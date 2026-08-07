@@ -281,7 +281,23 @@ def api_orders():
 
 @app.route("/api/export", methods=["POST"])
 def api_export():
+    # 兜底：任何异常写 export_error.log（exe 无 console，靠文件拿 traceback）
+    try:
+        return _api_export_impl()
+    except Exception:
+        import traceback
+        try:
+            with open("export_error.log", "a", encoding="utf-8") as f:
+                f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + traceback.format_exc() + "\n")
+        except Exception:
+            pass
+        return jsonify({"code": 1, "msg": "导出失败"}), 500
+
+
+def _api_export_impl():
     body = request.get_json(force=True, silent=True) or {}
+    # [诊断] 记录导出请求，便于排查 500
+    print("EXPORT_BODY:", json.dumps(body, ensure_ascii=False)[:3000], flush=True)
     rows = body.get("rows") or []
     fmt = body.get("fmt", "xlsx")
     more = bool(body.get("more"))          # 附带更多套餐（套餐2/3 新字段）
@@ -305,23 +321,20 @@ def api_export():
     headers = ["序号", "手机号", "省份", "城市", "等级", "预存(元)", "月低消(元)",
                "套餐", "月费(元/月)", "流量(G)", "通话(分钟)", "套餐详情"]
     if more:
-        # 并发拉取每个号码的可办套餐：第2/3个独立列，第4个及以后合并进「其他套餐」字段（| 分隔）
+        # 并发拉取每个号码的可办套餐：全部合并进「其他套餐」字段
+        # （第一个=默认/最划算套餐已在前面的「套餐/月费」列，这里放第2个及以后，| 分隔带详情）
         from concurrent.futures import ThreadPoolExecutor
         phones = [r[1] for r in rows]
         with ThreadPoolExecutor(max_workers=6) as pool:
             pkg_lists = list(pool.map(engine.fetcher.get_products_for_number, phones))
         extra = []
         for pkgs in pkg_lists:
-            p2 = pkgs[1] if len(pkgs) > 1 else {}
-            p3 = pkgs[2] if len(pkgs) > 2 else {}
-            rest = " | ".join("{}（{}元/月）".format(
-                p.get("productName", ""), (p.get("productFee") or 0) // 100)
-                for p in pkgs[3:])
-            extra.append([
-                p2.get("productName", ""), (p2.get("productFee") or 0) // 100,
-                p3.get("productName", ""), (p3.get("productFee") or 0) // 100,
-                rest])
-        headers += ["套餐2", "套餐2月费(元)", "套餐3", "套餐3月费(元)", "其他套餐"]
+            rest = " | ".join("{}（{}元/月）：{}".format(
+                p.get("productName", ""), (p.get("productFee") or 0) // 100,
+                (p.get("serviceDesc") or "").replace("\n", " ").strip())
+                for p in pkgs[1:])
+            extra.append([rest])
+        headers += ["其他套餐"]
         rows = [list(r) + e for r, e in zip(rows, extra)]
 
     bio = io.BytesIO()
@@ -893,7 +906,8 @@ function openPackageChoose(r){
   pkgRow = r; pkgSelIdx = -1; pkgSelList = [];
   $('pkgPhone').textContent = r.phone_number;
   $('pkgPre').textContent = '预存 ' + yuan(r.bossPrestore) + ' 元';
-  $('pkgName').textContent = r.productName || '默认套餐';
+  // 默认套餐卡：先用行内字段，接口返回后刷新为第一个（接口自带的默认/最划算套餐）
+  $('pkgName').textContent = r.productName || '加载中...';
   $('pkgFee').textContent = yuan(r.productFee) + ' 元/月';
   $('pkgQuota').textContent = '流量 ' + (r.liuTotal || 0) + ' G · 通话 ' + (r.callTotal || 0) + ' 分钟';
   $('pkgDesc').textContent = r.package || '';
@@ -901,6 +915,7 @@ function openPackageChoose(r){
   $('pkgList').innerHTML = '';
   $('pkgNext').style.display = 'none';
   $('pkgMask').style.display = 'flex';
+  loadPackageList();  // 点击号码直接列出所有套餐
   log('ok', '打开号码 ' + r.phone_number + ' 套餐选择');
 }
 $('pkgClose').onclick = closeMasks;
@@ -908,39 +923,47 @@ $('pkgMask').onclick = e => { if (e.target === $('pkgMask')) closeMasks(); };
 $('cfmClose').onclick = closeMasks;
 $('cfmMask').onclick = e => { if (e.target === $('cfmMask')) closeMasks(); };
 
-// 立即办理：默认套餐 → 订单确认
-$('pkgGoNow').onclick = () => {
-  if (!pkgRow) return;
-  showConfirm(pkgRow.phone_number, pkgRow.productName || '默认套餐',
-    yuan(pkgRow.productFee) + ' 元/月', yuan(pkgRow.bossPrestore) + ' 元',
-    '流量 ' + (pkgRow.liuTotal || 0) + ' G · 通话 ' + (pkgRow.callTotal || 0) + ' 分钟',
-    pkgRow.package || '');
-};
-
-// 更多套餐选择：加载 qryProductList 列表
-$('pkgMore').onclick = async () => {
-  const btn = $('pkgMore'); btn.disabled = true;
+// 加载 qryProductList 列表：第一个=接口默认（最划算），列表只显示第2个及以后（不重复）
+async function loadPackageList(){
   try {
     const r = await (await fetch('/api/packages?msisdn=' + encodeURIComponent(pkgRow.phone_number))).json();
     if (r.code) throw new Error(r.msg);
-    pkgSelList = r.data;
+    pkgSelList = r.data || [];
+    if (!pkgSelList.length) { $('pkgList').style.display = 'none'; return; }
+    // 默认套餐卡刷新为接口第一个（源码 PackageChooseCPMPage: packagesInfos[0] + sPackageIndex:0）
+    const first = pkgSelList[0];
+    $('pkgName').textContent = first.productName;
+    $('pkgFee').textContent = yuan(first.productFee) + ' 元/月';
+    $('pkgDesc').textContent = first.serviceDesc || '';
+    // 列表：第2个及以后
+    const rest = pkgSelList.slice(1);
     const list = $('pkgList');
-    list.style.display = 'flex';
-    list.innerHTML = pkgSelList.map((p, i) => `
+    list.style.display = rest.length ? 'flex' : 'none';
+    list.innerHTML = rest.map((p, i) => `
       <div class="pkg-item" id="pkgItem${i}">
         <div class="pkg-name">${p.productName}</div>
         <div class="pkg-fee">${yuan(p.productFee)} 元/月</div>
         <div class="pkg-desc">${(p.serviceDesc || '').slice(0, 120)}…</div>
       </div>`).join('');
-    pkgSelList.forEach((_, i) => $('pkgItem' + i).onclick = () => {
+    rest.forEach((_, i) => $('pkgItem' + i).onclick = () => {
       pkgSelIdx = i;
       document.querySelectorAll('.pkg-item').forEach(el => el.classList.remove('sel'));
       $('pkgItem' + i).classList.add('sel');
       $('pkgNext').style.display = '';
     });
-    log('ok', '该号码可办套餐 ' + pkgSelList.length + ' 个');
+    log('ok', '该号码可办套餐 ' + pkgSelList.length + ' 个（默认=第一个）');
   } catch(err) { log('error', '套餐列表加载失败: ' + err.message); }
-  btn.disabled = false;
+}
+$('pkgMore').onclick = loadPackageList;  // 保留按钮：重新加载列表（幂等）
+
+// 立即办理：默认套餐（接口第一个，加载前用行内字段兜底）→ 订单确认
+$('pkgGoNow').onclick = () => {
+  if (!pkgRow) return;
+  const p = pkgSelList.length ? pkgSelList[0] : pkgRow;
+  showConfirm(pkgRow.phone_number, p.productName || '默认套餐',
+    yuan(p.productFee) + ' 元/月', yuan(pkgRow.bossPrestore) + ' 元',
+    '流量 ' + (pkgRow.liuTotal || 0) + ' G · 通话 ' + (pkgRow.callTotal || 0) + ' 分钟',
+    p.serviceDesc || pkgRow.package || '');
 };
 
 // 下一步：选中的套餐 → 订单确认
@@ -1060,7 +1083,7 @@ document.querySelectorAll('.tab').forEach(tab => {
       r.data.map(x => `<option value="${x}">${x}</option>`).join('');
     log('info', '等级 ' + r.data.length + ' 种: ' + r.data.join(' '));
   } catch(e) {}
-  log('info', '靓号查询 v1.0.1 服务已连接，开始使用吧 ~');
+  log('info', '靓号查询 v1.0.2 服务已连接，开始使用吧 ~');
   connectSSE();
 })();
 </script>

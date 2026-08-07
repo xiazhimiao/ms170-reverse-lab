@@ -9,7 +9,13 @@ block_cipher = None
 a = Analysis(
     ['web_gui.py'],
     pathex=[],
-    binaries=[],
+    binaries=[
+        # numpy 1.26 的 OpenBLAS DLL 目录（PyInstaller 6.3 hook 漏收集，缺它 exe 内 numpy 导入失败）
+        (r'C:\ProgramData\Miniconda3\Lib\site-packages\numpy.libs', 'numpy.libs'),
+        # pandas 的 conda 重命名 MSVC 运行时 DLL：必须放 pandas.libs（pandas/__init__.py
+        # 的 _delvewheel_patch 从这里 add_dll_directory / 按 .load-order 预加载）
+        (r'C:\ProgramData\Miniconda3\Lib\site-packages\pandas.libs', 'pandas.libs'),
+    ],
     datas=[('类型.txt', '.')],
     hiddenimports=[
         'flask',
@@ -35,6 +41,8 @@ a = Analysis(
         'numpy',
         'pandas',
         'openpyxl',
+        # openpyxl 的第三方硬依赖：缺失会导致 exe 内 xlsx 导出 500（ModuleNotFoundError）
+        'et_xmlfile',
         'anime_bg',
         'phone_number_fetcher',
     ],

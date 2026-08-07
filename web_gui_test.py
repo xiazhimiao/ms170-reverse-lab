@@ -65,7 +65,7 @@ def main():
         page = get("/")
         check("首页 HTML 含核心元素", b"backdrop-filter" in page and b"btnStart" in page
               and b"flowBody" in page and b"orderBody" in page)
-        check("页面含版本标识", b"v1.0.1" in page)
+        check("页面含版本标识", b"v1.0.2" in page)
 
         # 静态检查：所有 btn 按钮都有 onclick 绑定（防止再漏）
         import re
@@ -167,6 +167,18 @@ def main():
         cd_dec = urllib.parse.unquote(cd)
         check("导出文件名含省/市/时间戳", "广东" in cd_dec and "深圳" in cd_dec
               and cd_dec.count("_") >= 2 and "filename*=UTF-8" in cd, cd_dec[:80])
+
+        # more=true：只加一列「其他套餐」（第2个及以后，带详情；第一个=默认在「套餐」列）
+        req = urllib.request.Request(BASE + "/api/export",
+                                     data=json.dumps({"rows": [["1", "13800000000", "广东", "深圳", "AAAAA",
+                                                                5000, 399, "联通畅享399元", 399, "150", "2000", "套餐详情文本"]],
+                                                      "fmt": "csv", "more": True,
+                                                      "fname_info": "广东_深圳"}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            d3 = resp.read().decode("utf-8", "ignore")
+        check("更多套餐只加一列且带详情", "其他套餐" in d3 and "套餐2" not in d3 and "套餐3" not in d3
+              and ("元/月" in d3 or "13800000000" in d3), f"{len(d3)} bytes")
 
         # 兼容性：旧版前端直接发送对象行（dict rows），金额为分
         req = urllib.request.Request(BASE + "/api/export",

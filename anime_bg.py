@@ -67,15 +67,27 @@ def fetch_random_bg(timeout: int = 15, on_error=None, total_budget: float = None
 
 
 def _fetch_all_bg(timeout, on_error):
-    for url in BG_SOURCES:
+    """并发请求所有图源，先成功者胜（避免串行时首源慢/挂把整体预算拖死）"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def fetch_one(url):
         try:
             r = _get_session().get(url, timeout=timeout, verify=False, headers=UA)
-            img = Image.open(io.BytesIO(r.content)).convert("RGB")
-            return img
+            return Image.open(io.BytesIO(r.content)).convert("RGB")
         except Exception as e:
             if on_error:
                 on_error(url, e)
-            continue
+            return None
+
+    pool = ThreadPoolExecutor(max_workers=len(BG_SOURCES))
+    futs = {pool.submit(fetch_one, url): url for url in BG_SOURCES}
+    try:
+        for fut in as_completed(futs):
+            img = fut.result()
+            if img is not None:
+                return img
+    finally:
+        pool.shutdown(wait=False)  # Python 3.9+ 线程池 worker 为 daemon，不阻塞进程退出
     return None
 
 
