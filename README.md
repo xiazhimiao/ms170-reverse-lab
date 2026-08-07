@@ -54,14 +54,25 @@ python web_gui.py --port 9000 --no-browser
 
 ## 目录结构
 
-| 文件 | 说明 |
-|---|---|
-| `web_gui.py` | 主程序（Flask 本地服务 + Web 界面 + 托盘） |
-| `phone_number_fetcher.py` | 渠道 API 封装（自动签名 / 指数退避重试 / 并发） |
-| `anime_bg.py` | 二次元背景图多源拉取（整体时间预算防拖死） |
-| `web_gui_test.py` | 冒烟测试（30 项检查） |
-| `web_gui.spec` | PyInstaller 打包配置（产出 靓号查询.exe） |
-| `phone_number_gui.py` | 旧版 tkinter 界面（已弃用，保留对照） |
+```
+ms170-reverse-lab/
+├── web_gui.py              # 主程序（Flask 本地服务 + Web 界面 + 托盘）
+├── phone_number_fetcher.py # 渠道 API 封装（自动签名 / 指数退避重试 / 并发）
+├── anime_bg.py             # 二次元背景图多源拉取（整体时间预算防拖死）
+├── web_gui_test.py         # 冒烟测试（30 项检查）
+├── web_gui.spec            # PyInstaller 打包配置（产出 靓号查询.exe）
+├── 类型.txt                # 等级数据（主程序同目录运行时读取）
+├── icon.ico                # 应用图标
+├── requirements.txt        # 依赖
+├── tools/
+│   └── make_icon.py        # 图标生成脚本（PIL 程序化绘制）
+└── legacy/                 # 已弃用的 tkinter 版（存档对照）
+    ├── phone_number_gui.py
+    ├── phone_number_gui.spec
+    ├── gui_v4_smoke_test.py
+    ├── build_installer.py
+    └── bg_preview_v4.png
+```
 
 ## 免责声明
 
