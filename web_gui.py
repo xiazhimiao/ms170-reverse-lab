@@ -289,6 +289,19 @@ def api_export():
     if not rows:
         return jsonify({"code": 1, "msg": "没有可导出的数据", "data": []})
 
+    # 兼容旧版前端直接发送的对象行（{index, phone_number, ...}）：规范化为数组行。
+    # 对象行的金额字段为「分」（worker 原始值），与前端 yuan() 一致转成元。
+    if isinstance(rows[0], dict):
+        rows = [[r.get("index", ""), r.get("phone_number", ""), r.get("province", ""),
+                 r.get("city", ""), r.get("rank", ""),
+                 (r.get("bossPrestore") or 0) // 100, (r.get("minConsume") or 0) // 100,
+                 r.get("productName", "") or "", (r.get("productFee") or 0) // 100,
+                 r.get("liuTotal", "") or "", r.get("callTotal", "") or "",
+                 r.get("package", "") or ""] for r in rows]
+    elif rows and len(rows[0]) < 12:
+        # 更早版本的列表行列数不足：补齐空列，避免 pandas 列数不匹配
+        rows = [list(r) + [""] * (12 - len(r)) for r in rows]
+
     headers = ["序号", "手机号", "省份", "城市", "等级", "预存(元)", "月低消(元)",
                "套餐", "月费(元/月)", "流量(G)", "通话(分钟)", "套餐详情"]
     if more:
@@ -341,12 +354,14 @@ _bg_lock = threading.Lock()
 
 
 def _bg_load():
-    # 短超时：图片源慢/挂时最多等 8s 放弃，避免刷新接口被外部源拖死
+    # 短超时：图片源慢/挂时最多等 8s 放弃；失败用程序化壁纸兜底（时间 seed），
+    # 保证「换背景」永远有响应（ts 必变），不被外部图源拖死
     img = anime_bg.fetch_random_bg(timeout=6, total_budget=8)
-    if img:
-        with _bg_lock:
-            _bg["img"] = img
-            _bg["ts"] = int(time.time() * 1000)
+    if img is None:
+        img = anime_bg.generate_anime_bg(seed=int(time.time()) % 100000)
+    with _bg_lock:
+        _bg["img"] = img
+        _bg["ts"] = int(time.time() * 1000)
 
 
 @app.route("/api/bg")

@@ -86,9 +86,13 @@ def main():
 
         bg = get("/api/bg")
         check("背景图返回 JPEG", bg[:2] == b"\xff\xd8", f"{len(bg)} bytes")
+        # 外部图源偶发抖动（8s 预算内未拉到图）：给一次重试机会再断言
         ts1 = get_json("/api/bg/refresh")["ts"]
         time.sleep(1.5)
         ts2 = get_json("/api/bg/refresh")["ts"]
+        if ts2 == ts1:
+            time.sleep(3)
+            ts2 = get_json("/api/bg/refresh")["ts"]
         check("换背景 ts 变化", ts2 != ts1, f"{ts1} -> {ts2}")
         bgts = get_json("/api/bg/ts")
         check("bg/ts 接口返回 ts/ready", bgts["code"] == 0 and bgts["ts"] > 0 and "ready" in bgts)
@@ -162,6 +166,20 @@ def main():
         cd_dec = urllib.parse.unquote(cd)
         check("导出文件名含省/市/时间戳", "广东" in cd_dec and "深圳" in cd_dec
               and cd_dec.count("_") >= 2 and "filename*=UTF-8" in cd, cd_dec[:80])
+
+        # 兼容性：旧版前端直接发送对象行（dict rows），金额为分
+        req = urllib.request.Request(BASE + "/api/export",
+                                     data=json.dumps({"rows": [{"index": "1", "phone_number": "13800000000",
+                                                                "province": "广东", "city": "深圳", "rank": "AAAAA",
+                                                                "bossPrestore": 500000, "minConsume": 39900,
+                                                                "productName": "联通畅享399元", "productFee": 39900,
+                                                                "liuTotal": "150", "callTotal": "2000",
+                                                                "package": "套餐详情文本"}],
+                                                      "fmt": "csv", "more": False}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            d2 = resp.read()
+        check("兼容对象行导出（旧前端）", b"13800000000" in d2 and b"5000" in d2, f"{len(d2)} bytes")
 
         print("== 停止 ==")
         post("/api/query/stop")
