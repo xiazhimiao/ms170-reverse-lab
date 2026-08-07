@@ -30,32 +30,50 @@ from phone_number_fetcher import PhoneNumberFetcher
 PORT = 8755
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ---------- 等级列表（类型.txt 优先，内嵌兜底） ----------
+# ---------- 等级列表（小程序字典优先，rankList 补充，内嵌兜底） ----------
 
-RANKS_EMBEDDED = [
-    "AAABBB", "ABCABC", "ABCD", "DCBA", "ABC", "ABCDABCD", "AAA", "ABAB",
-    "ABABAB", "AABBCC", "AABB", "AAAAB", "AAAB", "AAAAAB", "ABBA",
-    "ABABABAB", "AABBCCDD",
+# 小程序类型字典（与小程序页面一致）：/wechatSmall/v1/no/dictionaries/getDictionaryByCode
+# codes=makerAccNbrRankTypeConfig 实测抓包返回（2026-08-07，含 AAAA/AAAAA/ABCDE/AAAABBBB）
+RANKS_DICT = [
+    "ABCDE", "ABCDEF", "AAABBB", "ABCABC", "ABCD", "DCBA", "ABCDABCD", "ABC",
+    "AAAA", "AAAAA", "AAA", "ABAB", "ABABAB", "AABBCC", "AABB", "AAAAB",
+    "AAAB", "AAAAAB", "ABBA", "AAAABBBB", "ABABABAB", "AABBCCDD", "AAAAAAB",
 ]
+RANKS_EMBEDDED = RANKS_DICT
 
 
 def load_ranks():
-    """号码类型列表：优先 rankList 接口动态获取（小程序真实来源，40 种含中文类型），
-    接口失败回退类型.txt / 内嵌兜底"""
+    """号码类型列表：小程序字典接口（/agentCrm/v1/h5/dictionaries/getDictionaryByCode，
+    codes=makerAccNbrRankTypeConfig，与小程序类型弹窗同源，含 AAAA/AAAAA）实时拉取优先，
+    失败回退内置字典；rankList 接口 40 种去重补充（含中文类型）；类型.txt 兜底"""
+    seen, out = set(), []
     try:
-        ranks = engine.fetcher.get_rank_list()
-        if ranks:
-            return ranks
+        for r in engine.fetcher.get_rank_dict():
+            if r not in seen:
+                seen.add(r)
+                out.append(r)
+    except Exception:
+        pass
+    if not out:  # 字典接口失败 → 内置 23 种（与小程序一致的实测快照）
+        seen.update(RANKS_DICT)
+        out = list(RANKS_DICT)
+    try:
+        for r in engine.fetcher.get_rank_list():
+            if r not in seen:
+                seen.add(r)
+                out.append(r)
     except Exception:
         pass
     try:
         with open(os.path.join(BASE_DIR, "类型.txt"), encoding="utf-8") as f:
-            ranks = [ln.strip() for ln in f if ln.strip()]
-        if ranks:
-            return ranks
+            for ln in f:
+                r = ln.strip()
+                if r and r not in seen:
+                    seen.add(r)
+                    out.append(r)
     except Exception:
         pass
-    return list(RANKS_EMBEDDED)
+    return out
 
 
 # ---------- 查询引擎（后台线程 + SSE 事件推送） ----------
@@ -1017,10 +1035,12 @@ PAGE = r"""<!DOCTYPE html>
     项目源码：<a href="https://github.com/xiazhimiao/ms170-reverse-lab" target="_blank">ms170-reverse-lab</a></div>
 </div>
 
-<!-- 类型选择弹窗（分页列表 20/页，替代下拉框） -->
+<!-- 类型选择弹窗（分页列表 20/页，置顶类型优先第一页） -->
 <div class="modal-mask" id="rankMask" style="display:none">
   <div class="modal glass" style="max-width:560px">
-    <div class="modal-head"><span>🎯 选择号码类型</span><button class="modal-close" id="rankClose">✕</button></div>
+    <div class="modal-head"><span>🎯 选择号码类型</span><span style="flex:1"></span>
+      <button class="pill ghost" id="rankPinBtn" style="padding:4px 10px;font-size:12px" title="置顶的类型排在第一页，可自定义">📌 置顶设置</button>
+      <button class="modal-close" id="rankClose">✕</button></div>
     <div id="rankGrid" class="rank-grid"></div>
     <div class="rank-page">
       <button class="pill ghost" id="rankPrev" style="padding:5px 14px">← 上一页</button>
@@ -1028,6 +1048,19 @@ PAGE = r"""<!DOCTYPE html>
       <button class="pill ghost" id="rankNext" style="padding:5px 14px">下一页 →</button>
     </div>
     <button class="pill ghost" id="rankNone" style="margin-top:12px">不限（全部类型）</button>
+  </div>
+</div>
+
+<!-- 置顶类型编辑弹窗 -->
+<div class="modal-mask" id="pinnedMask" style="display:none">
+  <div class="modal glass" style="max-width:480px">
+    <div class="modal-head"><span>📌 置顶类型</span><button class="modal-close" id="pinnedClose">✕</button></div>
+    <p class="hint" style="padding:4px 0 8px">置顶的类型排在选择列表<b>第一页</b>（每行一个，可填写接口未列出的类型，如 AAAA / AAAAA / ABCDE）</p>
+    <textarea id="pinnedInput" rows="10" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.25);border-radius:8px;padding:8px;font-family:monospace;font-size:13px" placeholder="AAAA&#10;AAAAA&#10;ABCDE"></textarea>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="pill ghost" id="pinnedSave" style="flex:1">保存</button>
+      <button class="pill ghost" id="pinnedReset" style="flex:1">恢复默认</button>
+    </div>
   </div>
 </div>
 
@@ -1554,25 +1587,52 @@ document.querySelectorAll('.tab').forEach(tab => {
   };
 });
 
-/* ---------- 类型选择（分页列表 20/页，替代下拉框） ---------- */
+/* ---------- 类型选择（分页列表 20/页，置顶类型优先第一页） ---------- */
 let rankList = [];   // 全部类型（rankList 接口动态 40 种）
 let rankPage = 1;    // 当前页
 let rankSel = '';    // 已选类型（'' = 不限）
 const RANK_PAGE = 20;
+// 默认置顶：高频类型（接口未列出的如 AAAA/AAAAA/ABCDE 也能正常查询）
+const DEFAULT_PINNED = ['AAAA','AAAAA','ABCDE','ABCDEF','AAAAAAB','AAAAAB','AAABBB','ABCDABCD','ABCD','AAA','ABABAB'];
+const PINNED_KEY = 'rankPinned_v106';
+
+function loadPinned(){
+  try {
+    const v = JSON.parse(localStorage.getItem(PINNED_KEY));
+    if (Array.isArray(v) && v.length) return v.filter(x => typeof x === 'string' && x.trim());
+  } catch(e) {}
+  return DEFAULT_PINNED.slice();
+}
+function savePinned(list){ localStorage.setItem(PINNED_KEY, JSON.stringify(list)); }
+let pinned = loadPinned();   // 当前置顶列表（localStorage 持久化）
+
+function orderedRanks(){     // 置顶在前（用户顺序），接口其余跟随，去重
+  const seen = new Set(), out = [];
+  pinned.forEach(r => { if (!seen.has(r)) { seen.add(r); out.push(r); } });
+  rankList.forEach(r => { if (!seen.has(r)) { seen.add(r); out.push(r); } });
+  return out;
+}
 
 function renderRankGrid(){
+  const list = orderedRanks();
+  const total = Math.ceil(list.length / RANK_PAGE) || 1;
+  if (rankPage > total) rankPage = total;
   const start = (rankPage - 1) * RANK_PAGE;
-  const items = rankList.slice(start, start + RANK_PAGE);
-  $('rankGrid').innerHTML = items.map(r =>
+  const items = list.slice(start, start + RANK_PAGE);
+  // 第一页首格「全部」（与小程序布局一致：全部 → 重点类型 → 更多）
+  let btns = '';
+  if (rankPage === 1) btns += `<button class="${rankSel === '' ? 'sel' : ''}" data-v="">全部</button>`;
+  btns += items.map(r =>
     `<button class="${r === rankSel ? 'sel' : ''}" data-v="${r}">${r}</button>`).join('');
+  $('rankGrid').innerHTML = btns;
   Array.from($('rankGrid').children).forEach(b => b.onclick = () => {
     rankSel = b.dataset.v;
-    $('btnRank').textContent = rankSel;
+    $('btnRank').textContent = rankSel || '不限';
     $('rankMask').style.display = 'none';
-    log('info', '已选类型: ' + rankSel);
+    log('info', rankSel ? '已选类型: ' + rankSel : '类型: 不限');
   });
-  const total = Math.ceil(rankList.length / RANK_PAGE) || 1;
-  $('rankPageNo').textContent = '第 ' + rankPage + '/' + total + ' 页 · 共 ' + rankList.length + ' 种';
+  $('rankPageNo').textContent = '第 ' + rankPage + '/' + total + ' 页 · 共 ' + list.length + ' 种' +
+    (pinned.length ? ' · 置顶 ' + pinned.length + ' 种' : '');
   $('rankPrev').disabled = rankPage <= 1;
   $('rankNext').disabled = rankPage >= total;
 }
@@ -1580,11 +1640,35 @@ $('btnRank').onclick = () => { rankPage = 1; renderRankGrid(); $('rankMask').sty
 $('rankClose').onclick = () => $('rankMask').style.display = 'none';
 $('rankMask').onclick = e => { if (e.target === $('rankMask')) $('rankMask').style.display = 'none'; };
 $('rankPrev').onclick = () => { if (rankPage > 1) { rankPage--; renderRankGrid(); } };
-$('rankNext').onclick = () => { if (rankPage * RANK_PAGE < rankList.length) { rankPage++; renderRankGrid(); } };
+$('rankNext').onclick = () => { if (rankPage * RANK_PAGE < orderedRanks().length) { rankPage++; renderRankGrid(); } };
 $('rankNone').onclick = () => {
   rankSel = '';
   $('btnRank').textContent = '不限';
   $('rankMask').style.display = 'none';
+};
+
+/* ---------- 置顶类型设置（默认 11 个高频类型，支持自定义） ---------- */
+$('rankPinBtn').onclick = () => { $('pinnedInput').value = pinned.join('\n'); $('pinnedMask').style.display = 'flex'; };
+$('pinnedClose').onclick = () => $('pinnedMask').style.display = 'none';
+$('pinnedMask').onclick = e => { if (e.target === $('pinnedMask')) $('pinnedMask').style.display = 'none'; };
+$('pinnedSave').onclick = () => {
+  const list = $('pinnedInput').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const seen = new Set(), uniq = [];
+  list.forEach(x => { if (!seen.has(x)) { seen.add(x); uniq.push(x); } });
+  pinned = uniq;
+  savePinned(pinned);
+  rankPage = 1;
+  renderRankGrid();
+  $('pinnedMask').style.display = 'none';
+  log('info', '置顶类型已保存: ' + pinned.join(' '));
+};
+$('pinnedReset').onclick = () => {
+  pinned = DEFAULT_PINNED.slice();
+  $('pinnedInput').value = pinned.join('\n');
+  savePinned(pinned);
+  rankPage = 1;
+  renderRankGrid();
+  log('info', '置顶类型已恢复默认');
 };
 
 /* ---------- 初始化 ---------- */
@@ -1598,7 +1682,7 @@ $('rankNone').onclick = () => {
   } catch(e) {
     log('error', '类型加载失败: ' + e.message);
   }
-  log('info', '靓号查询 v1.0.6 服务已连接，开始使用吧 ~');
+  log('info', '靓号查询 v1.0.7 服务已连接，开始使用吧 ~');
   connectSSE();
 })();
 </script>

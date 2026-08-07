@@ -165,6 +165,26 @@ class PhoneNumberFetcher:
             print(f"获取二维码失败: {result}")
             return False
 
+    def get_rank_dict(self) -> List[str]:
+        """号码类型字典（与小程序类型弹窗同源）：/agentCrm/v1/h5/dictionaries/getDictionaryByCode
+
+        codes=makerAccNbrRankTypeConfig，无 token 直接可调（2026-08-07 实测），
+        返回 23 种含 AAAA/AAAAA/ABCDE/AAAABBBB（小程序 PC 版抓包确认同一份）。
+        接口失败返回 []。
+        """
+        try:
+            result = self._make_request(
+                f"{self.base_url}/agentCrm/v1/h5/dictionaries/getDictionaryByCode",
+                {"codes": "makerAccNbrRankTypeConfig"})
+            if result and result.get("code") == 10200:
+                value = (result.get("data") or {}).get("value1", "")
+                lst = [x.strip() for x in str(value).split(",") if x.strip()]
+                if lst:
+                    return lst
+        except Exception:
+            pass
+        return []
+
     def get_rank_list(self) -> List[str]:
         """号码类型列表（rankList 接口动态返回，含 情侣号/生日号/个性号 等中文类型）
 

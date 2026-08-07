@@ -75,7 +75,7 @@ def main():
         html = page.decode("utf-8")
         check("首页 HTML 含核心元素", b"backdrop-filter" in page and b"btnStart" in page
               and b"flowBody" in page and b"orderBody" in page)
-        check("页面含版本标识", b"v1.0.6" in page)
+        check("页面含版本标识", b"v1.0.7" in page)
         # 导出格式切换（默认 DuckDB 入库）+ duckdb 前端分支
         check("导出格式切换", 'id="expFmt"' in html and 'value="duckdb"' in html
               and 'value="xlsx"' in html and 'value="csv"' in html
@@ -86,6 +86,14 @@ def main():
               and 'id="rankGrid"' in html and 'id="rankPrev"' in html and 'id="rankNext"' in html
               and 'id="rankNone"' in html and 'id="rankPageNo"' in html
               and 'id="rank"' not in html)
+        # 置顶类型：默认 11 个高频类型（含接口未列出的 AAAA/AAAAA/ABCDE）排第一页 + 自定义编辑弹窗
+        check("置顶类型功能", 'id="rankPinBtn"' in html and 'id="pinnedMask"' in html
+              and 'id="pinnedInput"' in html and 'id="pinnedSave"' in html and 'id="pinnedReset"' in html
+              and "DEFAULT_PINNED" in html and "orderedRanks" in html and "loadPinned" in html
+              and "rankPinned_v106" in html and "'AAAA'" in html and "'AAAAA'" in html
+              and "'ABCDE'" in html and "'AAAAAAB'" in html and "'ABABAB'" in html
+              and "置顶的类型排在选择列表" in html
+              and 'data-v="">全部' in html and "rankPage === 1" in html)
         check("导出进度条弹窗元素", 'id="expMask"' in html and 'id="expBar"' in html
               and 'id="expText"' in html and "export/status" in html and "export/download" in html)
         # 号码结果分页：首页/上一页/页码窗口(±2+省略号)/下一页/末页
