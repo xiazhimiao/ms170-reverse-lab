@@ -1,5 +1,7 @@
 # 靓号查询（微信小程序渠道 API 研究）
 
+> 作者：[xiazhimiao](https://github.com/xiazhimiao) ｜ 项目：[ms170-reverse-lab](https://github.com/xiazhimiao/ms170-reverse-lab)
+
 > ⚠️ **软件仅供学习测试使用，请勿商用！** 本项目仅用于微信小程序逆向与接口协议学习研究，请合理控制查询频率，尊重目标服务。
 
 对「民生靓号」微信小程序（wx33aafb5db3e8214f）渠道 API 的还原研究：从反编译小程序源码出发，还原签名算法与接口协议，实现号码查询、套餐选择、订单确认的完整流程复刻。

@@ -471,7 +471,9 @@ PAGE = r"""<!DOCTYPE html>
            padding-bottom:6px}
   .cfm-row b{color:var(--ink)}
   .disclaimer{margin-top:auto;text-align:center;font-size:12px;color:var(--faint);
-              padding:8px 0 2px}
+              padding:8px 0 2px;line-height:1.7}
+  .disclaimer a{color:var(--pink);text-decoration:none}
+  .disclaimer a:hover{text-decoration:underline}
   .wrap{height:100vh;display:flex;flex-direction:column;gap:12px;padding:14px 18px;
         max-width:1280px;margin:0 auto}
   /* 毛玻璃条 */
@@ -632,7 +634,9 @@ PAGE = r"""<!DOCTYPE html>
   </main>
 
   <div class="glass" id="log"></div>
-  <div class="disclaimer">⚠ 软件仅供学习测试使用，请勿商用！请合理控制查询频率，尊重目标服务。</div>
+  <div class="disclaimer">⚠ 软件仅供学习测试使用，请勿商用！请合理控制查询频率，尊重目标服务。<br>
+    作者：<a href="https://github.com/xiazhimiao" target="_blank">xiazhimiao</a> ｜
+    项目源码：<a href="https://github.com/xiazhimiao/ms170-reverse-lab" target="_blank">ms170-reverse-lab</a></div>
 </div>
 
 <!-- 套餐选择弹窗（复刻小程序：号码 → 预存 → 默认套餐 → 立即办理/更多套餐 → 下一步） -->
