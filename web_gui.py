@@ -1060,7 +1060,7 @@ document.querySelectorAll('.tab').forEach(tab => {
       r.data.map(x => `<option value="${x}">${x}</option>`).join('');
     log('info', '等级 ' + r.data.length + ' 种: ' + r.data.join(' '));
   } catch(e) {}
-  log('info', '服务已连接，开始使用吧 ~');
+  log('info', '靓号查询 v1.0.1 服务已连接，开始使用吧 ~');
   connectSSE();
 })();
 </script>

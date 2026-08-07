@@ -65,6 +65,7 @@ def main():
         page = get("/")
         check("首页 HTML 含核心元素", b"backdrop-filter" in page and b"btnStart" in page
               and b"flowBody" in page and b"orderBody" in page)
+        check("页面含版本标识", b"v1.0.1" in page)
 
         # 静态检查：所有 btn 按钮都有 onclick 绑定（防止再漏）
         import re
