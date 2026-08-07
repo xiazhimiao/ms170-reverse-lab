@@ -24,6 +24,7 @@ from PIL import Image, ImageDraw
 from werkzeug.serving import make_server
 
 import anime_bg
+import duckdb_store
 from phone_number_fetcher import PhoneNumberFetcher
 
 PORT = 8755
@@ -39,6 +40,14 @@ RANKS_EMBEDDED = [
 
 
 def load_ranks():
+    """号码类型列表：优先 rankList 接口动态获取（小程序真实来源，40 种含中文类型），
+    接口失败回退类型.txt / 内嵌兜底"""
+    try:
+        ranks = engine.fetcher.get_rank_list()
+        if ranks:
+            return ranks
+    except Exception:
+        pass
     try:
         with open(os.path.join(BASE_DIR, "类型.txt"), encoding="utf-8") as f:
             ranks = [ln.strip() for ln in f if ln.strip()]
@@ -114,6 +123,7 @@ class QueryEngine:
         province = params.get("province", "")
         city = params.get("city", "")
         rank = params.get("rank", "")
+        msisdn = params.get("msisdn", "")   # 号码关键词搜索（与地区/类型独立可组合）
         try:
             max_pages = int(params.get("max_pages", 0) or 0)
         except (TypeError, ValueError):
@@ -132,7 +142,7 @@ class QueryEngine:
                     self.emit({"type": "log", "level": "info", "msg": f"达到最大页数 {max_pages}，停止"})
                     break
                 rows = self.fetcher.get_phone_numbers_parallel(
-                    page, province, city, rank, series, workers=5)
+                    page, province, city, rank, msisdn, series, workers=5)
                 if rows is None:
                     self.emit({"type": "log", "level": "error", "msg": f"第 {page} 页请求异常，查询终止"})
                     break
@@ -279,11 +289,34 @@ def api_orders():
         return jsonify({"code": 1, "msg": f"订单查询失败: {e}", "data": []})
 
 
+# 异步导出任务表（勾选「附带更多套餐」时套餐拉取耗时，后台任务 + 进度轮询）
+_EXPORT_TASKS = {}    # task_id -> {status/done/total/data/mime/fname/error}
+_EXPORT_LOCK = threading.Lock()
+
+
 @app.route("/api/export", methods=["POST"])
 def api_export():
     # 兜底：任何异常写 export_error.log（exe 无 console，靠文件拿 traceback）
     try:
-        return _api_export_impl()
+        body = request.get_json(force=True, silent=True) or {}
+        # [诊断] 记录导出请求，便于排查 500
+        print("EXPORT_BODY:", json.dumps(body, ensure_ascii=False)[:3000], flush=True)
+        if body.get("more"):
+            # 附带更多套餐：每个号码都要并发拉套餐，耗时较长 → 异步任务，
+            # 返回 task id，前端轮询 /api/export/status 显示进度条
+            rows = body.get("rows") or []
+            if not rows:
+                return jsonify({"code": 1, "msg": "没有可导出的数据", "data": []})
+            import uuid
+            task_id = uuid.uuid4().hex[:12]
+            with _EXPORT_LOCK:
+                _EXPORT_TASKS[task_id] = {"status": "running", "done": 0,
+                                          "total": len(rows), "data": None,
+                                          "mime": "", "fname": "", "table": "",
+                                          "rows": 0, "error": ""}
+            threading.Thread(target=_export_worker, args=(task_id, body), daemon=True).start()
+            return jsonify({"code": 0, "task": task_id})
+        return _export_sync(body)
     except Exception:
         import traceback
         try:
@@ -294,16 +327,109 @@ def api_export():
         return jsonify({"code": 1, "msg": "导出失败"}), 500
 
 
-def _api_export_impl():
-    body = request.get_json(force=True, silent=True) or {}
-    # [诊断] 记录导出请求，便于排查 500
-    print("EXPORT_BODY:", json.dumps(body, ensure_ascii=False)[:3000], flush=True)
+def _export_worker(task_id, body):
+    """异步导出任务：并发拉套餐（每完成一个更新进度）→ 写 duckdb 或生成文件 → 存结果"""
+    try:
+        def progress(done, total):
+            with _EXPORT_LOCK:
+                _EXPORT_TASKS[task_id]["done"] = done
+        res = _do_export(body, progress)
+        with _EXPORT_LOCK:
+            t = _EXPORT_TASKS[task_id]
+            t["status"] = "done"
+            t["done"] = t["total"]
+            if res["kind"] == "table":
+                t["table"] = res["table"]
+                t["rows"] = res["rows"]
+                t["workflow"] = res.get("workflow", [])
+            else:
+                t["data"] = res["data"]
+                t["mime"] = res["mime"]
+                t["fname"] = res["fname"]
+    except Exception as e:
+        import traceback
+        try:
+            with open("export_error.log", "a", encoding="utf-8") as f:
+                f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") +
+                        f"[export task {task_id}] " + traceback.format_exc() + "\n")
+        except Exception:
+            pass
+        with _EXPORT_LOCK:
+            _EXPORT_TASKS[task_id]["status"] = "error"
+            _EXPORT_TASKS[task_id]["error"] = str(e)
+
+
+@app.route("/api/export/status")
+def api_export_status():
+    """异步导出进度：{status: running/done/error, done, total, error, table, rows}"""
+    task = request.args.get("task", "")
+    with _EXPORT_LOCK:
+        t = _EXPORT_TASKS.get(task)
+    if not t:
+        return jsonify({"code": 1, "msg": "导出任务不存在"})
+    return jsonify({"code": 0, "status": t["status"], "done": t["done"],
+                    "total": t["total"], "error": t.get("error", ""),
+                    "table": t.get("table", ""), "rows": t.get("rows", 0),
+                    "workflow": t.get("workflow", [])})
+
+
+@app.route("/api/export/download")
+def api_export_download():
+    """异步导出完成后取文件（文件名/内容存任务表）"""
+    task = request.args.get("task", "")
+    with _EXPORT_LOCK:
+        t = _EXPORT_TASKS.get(task)
+    if not t:
+        return jsonify({"code": 1, "msg": "导出任务不存在"}), 404
+    if t["status"] != "done":
+        return jsonify({"code": 1, "msg": "导出尚未完成"}), 400
+    if not t.get("fname"):
+        return jsonify({"code": 1, "msg": "该任务写入 duckdb，无文件可下载"}), 400
+    import urllib.parse
+    fmt = t["fname"].rsplit(".", 1)[-1]
+    quoted = urllib.parse.quote(t["fname"])
+    return Response(t["data"], mimetype=t["mime"],
+                    headers={"Content-Disposition": f"attachment; filename=export.{fmt}; filename*=UTF-8''{quoted}"})
+
+
+def _export_sync(body):
+    """同步导出（未勾选更多套餐：列表已加载，快）"""
+    res = _do_export(body)
+    if res["kind"] == "table":
+        wf_msg = ""
+        wf = res.get("workflow", [])
+        if wf:
+            ok = sum(1 for r in wf if r["ok"])
+            wf_msg = " · 工作流 {}/{} 步成功".format(ok, len(wf))
+        return jsonify({"code": 0, "table": res["table"], "rows": res["rows"],
+                        "workflow": wf,
+                        "msg": "已写入 duckdb：表 {}（{} 行）{}".format(
+                            res["table"], res["rows"], wf_msg)})
+    if res.get("data") is None:
+        return jsonify({"code": 1, "msg": "没有可导出的数据", "data": []})
+    import urllib.parse
+    quoted = urllib.parse.quote(res["fname"])
+    fmt = res["fname"].rsplit(".", 1)[-1]
+    return Response(res["data"], mimetype=res["mime"],
+                    headers={"Content-Disposition": f"attachment; filename=export.{fmt}; filename*=UTF-8''{quoted}"})
+
+
+def _do_export(body, progress=None):
+    """执行导出：整理行 → 拉更多套餐（进度回调）→ 写 duckdb 或生成文件。
+
+    Args:
+        body: 导出请求体（rows/fmt/more/fname_info）
+        progress: 可选回调 progress(done, total)，「更多套餐」拉取阶段每完成一个号码调用
+
+    Returns:
+        {"kind": "table", "table", "rows"} 或 {"kind": "file", "data", "mime", "fname"}
+    """
     rows = body.get("rows") or []
     fmt = body.get("fmt", "xlsx")
-    more = bool(body.get("more"))          # 附带更多套餐（套餐2/3 新字段）
+    more = bool(body.get("more"))          # 附带更多套餐
     fname_info = body.get("fname_info") or "全国_全部"  # 文件名信息（省_市）
     if not rows:
-        return jsonify({"code": 1, "msg": "没有可导出的数据", "data": []})
+        return {"kind": "file", "data": None, "mime": "", "fname": ""}
 
     # 兼容旧版前端直接发送的对象行（{index, phone_number, ...}）：规范化为数组行。
     # 对象行的金额字段为「分」（worker 原始值），与前端 yuan() 一致转成元。
@@ -315,7 +441,7 @@ def _api_export_impl():
                  r.get("liuTotal", "") or "", r.get("callTotal", "") or "",
                  r.get("package", "") or ""] for r in rows]
     elif rows and len(rows[0]) < 12:
-        # 更早版本的列表行列数不足：补齐空列，避免 pandas 列数不匹配
+        # 更早版本的列表行列数不足：补齐空列，避免列数不匹配
         rows = [list(r) + [""] * (12 - len(r)) for r in rows]
 
     headers = ["序号", "手机号", "省份", "城市", "等级", "预存(元)", "月低消(元)",
@@ -323,19 +449,37 @@ def _api_export_impl():
     if more:
         # 并发拉取每个号码的可办套餐：全部合并进「其他套餐」字段
         # （第一个=默认/最划算套餐已在前面的「套餐/月费」列，这里放第2个及以后，| 分隔带详情）
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         phones = [r[1] for r in rows]
+        extra = [None] * len(phones)
+        done = [0]
         with ThreadPoolExecutor(max_workers=6) as pool:
-            pkg_lists = list(pool.map(engine.fetcher.get_products_for_number, phones))
-        extra = []
-        for pkgs in pkg_lists:
-            rest = " | ".join("{}（{}元/月）：{}".format(
-                p.get("productName", ""), (p.get("productFee") or 0) // 100,
-                (p.get("serviceDesc") or "").replace("\n", " ").strip())
-                for p in pkgs[1:])
-            extra.append([rest])
+            futs = {pool.submit(engine.fetcher.get_products_for_number, ph): i
+                    for i, ph in enumerate(phones)}
+            for fut in as_completed(futs):
+                i = futs[fut]
+                pkgs = fut.result() or []
+                rest = " | ".join("{}（{}元/月）：{}".format(
+                    p.get("productName", ""), (p.get("productFee") or 0) // 100,
+                    (p.get("serviceDesc") or "").replace("\n", " ").strip())
+                    for p in pkgs[1:])
+                extra[i] = [rest]
+                done[0] += 1
+                if progress:
+                    progress(done[0], len(phones))
         headers += ["其他套餐"]
         rows = [list(r) + e for r, e in zip(rows, extra)]
+
+    if fmt == "duckdb":
+        # 写入本地 DuckDB 文件建表（表名 = 靓号查询_省_市_时间戳）
+        table = "靓号查询_{}_{}".format(
+            fname_info.replace("/", "_").replace("\\", "_"),
+            time.strftime("%Y%m%d_%H%M%S"))
+        n = duckdb_store.write_table(table, headers, rows)
+        # 工作流（启用时）自动应用到新表
+        wf = duckdb_store.load_workflow()
+        wf_results = duckdb_store.apply_workflow(table, wf) if (wf["active"] and wf["steps"]) else []
+        return {"kind": "table", "table": table, "rows": n, "workflow": wf_results}
 
     bio = io.BytesIO()
     fname = "靓号查询_{}_{}.{}".format(
@@ -353,11 +497,180 @@ def _api_export_impl():
         pd.DataFrame(rows, columns=headers).to_excel(bio, index=False)
         mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     bio.seek(0)
-    # 中文文件名需 RFC 5987 编码（latin-1 头会崩）
+    return {"kind": "file", "data": bio.getvalue(), "mime": mime, "fname": fname}
+
+
+# ---------- 数据库管理（duckdb 表状态 + 导出 xlsx） ----------
+
+@app.route("/api/db/tables")
+def api_db_tables():
+    return jsonify({"code": 0, "data": duckdb_store.list_tables()})
+
+
+@app.route("/api/db/table")
+def api_db_table():
+    name = request.args.get("name", "")
+    t = duckdb_store.get_table(name)
+    if t is None:
+        return jsonify({"code": 1, "msg": "表不存在"})
+    return jsonify({"code": 0, "data": t})
+
+
+@app.route("/api/db/data")
+def api_db_data():
+    """分页预览（带 rowid 供单元格编辑定位）：?name=&offset=&limit="""
+    name = request.args.get("name", "")
+    try:
+        offset = max(0, int(request.args.get("offset", "0")))
+        limit = min(500, max(1, int(request.args.get("limit", "100"))))
+    except ValueError:
+        offset, limit = 0, 100
+    t = duckdb_store.preview_table(name, offset, limit)
+    if t is None:
+        return jsonify({"code": 1, "msg": "表不存在"})
+    return jsonify({"code": 0, "data": t})
+
+
+@app.route("/api/db/edit", methods=["POST"])
+def api_db_edit():
+    """编辑单个单元格：{name, rowid, column, value}"""
+    body = request.get_json(force=True, silent=True) or {}
+    ok = duckdb_store.edit_cell(body.get("name", ""), body.get("rowid"),
+                                body.get("column", ""), body.get("value", ""))
+    if not ok:
+        return jsonify({"code": 1, "msg": "编辑失败（表/列不存在）"})
+    return jsonify({"code": 0, "msg": "已保存"})
+
+
+# 前端参数名 → duckdb_store 函数参数名 别名表（前端统一 match_column/match_keyword/target_column/column 风格）
+_OP_ARG_ALIAS = {
+    "append_text": {"match_column": "match_col", "match_keyword": "keyword"},
+    "prepend_text": {"match_column": "match_col", "match_keyword": "keyword"},
+    "set_if_contains": {"match_column": "match_col", "target_column": "target_col"},
+    "rename_column": {"column": "new"},
+}
+
+
+@app.route("/api/db/op", methods=["POST"])
+def api_db_op():
+    """通用字段操作入口：{name, op, ...args}（op = duckdb_store 原语名）"""
+    body = request.get_json(force=True, silent=True) or {}
+    name = body.get("name", "")
+    op = body.get("op", "")
+    fn = getattr(duckdb_store, op, None)
+    if not fn:
+        return jsonify({"code": 1, "msg": "未知操作: " + op})
+    if duckdb_store.get_table(name) is None:
+        return jsonify({"code": 1, "msg": "表不存在"})
+    # 只传操作函数认识的参数（name 固定第一参数），按别名表翻译前端参数名
+    import inspect
+    params = inspect.signature(fn).parameters
+    alias = _OP_ARG_ALIAS.get(op, {})
+    kwargs = {}
+    for k, v in body.items():
+        if k in ("name", "op"):
+            continue
+        key = alias.get(k, k)
+        if key in params:
+            kwargs[key] = v
+    try:
+        result = fn(name, **kwargs)
+        if isinstance(result, bool):
+            result = 1 if result else 0
+        return jsonify({"code": 0, "affected": result,
+                        "msg": "操作成功（影响 {} 行）".format(result)})
+    except Exception as e:
+        return jsonify({"code": 1, "msg": "操作失败: {}".format(e)})
+
+
+# ---------- 工作流（步骤引擎 + 导入导出 + 自动应用） ----------
+
+@app.route("/api/workflow", methods=["GET"])
+def api_workflow_get():
+    wf = duckdb_store.load_workflow()
+    wf["file"] = duckdb_store.get_workflow_path()
+    return jsonify({"code": 0, "data": wf})
+
+
+@app.route("/api/workflow", methods=["POST"])
+def api_workflow_save():
+    body = request.get_json(force=True, silent=True) or {}
+    wf = duckdb_store.save_workflow(body)
+    return jsonify({"code": 0, "data": wf, "msg": "工作流已保存"})
+
+
+@app.route("/api/workflow/toggle", methods=["POST"])
+def api_workflow_toggle():
+    body = request.get_json(force=True, silent=True) or {}
+    wf = duckdb_store.load_workflow()
+    wf["active"] = bool(body.get("active"))
+    duckdb_store.save_workflow(wf)
+    return jsonify({"code": 0, "data": wf,
+                    "msg": "工作流已{}".format("启用（新导出的表将自动执行）" if wf["active"] else "停用")})
+
+
+@app.route("/api/workflow/apply", methods=["POST"])
+def api_workflow_apply():
+    """对指定表立即应用当前工作流（编辑过的内存版本）"""
+    body = request.get_json(force=True, silent=True) or {}
+    name = body.get("name", "")
+    if duckdb_store.get_table(name) is None:
+        return jsonify({"code": 1, "msg": "表不存在"})
+    wf = {"active": False, "name": body.get("name", ""),
+          "steps": body.get("steps") or []}
+    if not wf["steps"]:
+        return jsonify({"code": 1, "msg": "工作流没有步骤"})
+    results = duckdb_store.apply_workflow(name, wf)
+    ok = sum(1 for r in results if r["ok"])
+    return jsonify({"code": 0, "results": results,
+                    "msg": "工作流执行完成：{}/{} 步成功".format(ok, len(results))})
+
+
+@app.route("/api/workflow/download")
+def api_workflow_download():
+    """下载工作流 JSON（分享给他人：发这个文件即可看懂意图）"""
+    wf = duckdb_store.load_workflow()
     import urllib.parse
+    fname = "工作流_{}.json".format(time.strftime("%Y%m%d_%H%M%S"))
     quoted = urllib.parse.quote(fname)
-    return Response(bio.getvalue(), mimetype=mime,
-                    headers={"Content-Disposition": f"attachment; filename=export.{fmt}; filename*=UTF-8''{quoted}"})
+    data = json.dumps(wf, ensure_ascii=False, indent=2).encode("utf-8")
+    return Response(data, mimetype="application/json",
+                    headers={"Content-Disposition": f"attachment; filename=workflow.json; filename*=UTF-8''{quoted}"})
+
+
+@app.route("/api/workflow/upload", methods=["POST"])
+def api_workflow_upload():
+    """导入工作流 JSON（raw body 或 multipart file）"""
+    try:
+        if request.files:
+            f = request.files.get("file")
+            raw = f.read().decode("utf-8", "ignore")
+        else:
+            raw = request.get_data(as_text=True)
+        data = json.loads(raw)
+        if not isinstance(data, dict) or "steps" not in data:
+            return jsonify({"code": 1, "msg": "不是有效的工作流 JSON（缺少 steps）"})
+        wf = duckdb_store.save_workflow(data)
+        return jsonify({"code": 0, "data": wf,
+                        "msg": "已导入工作流（{} 步）".format(len(wf["steps"]))})
+    except Exception as e:
+        return jsonify({"code": 1, "msg": "导入失败: {}".format(e)})
+
+
+@app.route("/api/db/export")
+def api_db_export():
+    """导出整张表为 xlsx 下载"""
+    name = request.args.get("name", "")
+    data = duckdb_store.export_table_xlsx(name)
+    if data is None:
+        return jsonify({"code": 1, "msg": "表不存在"}), 404
+    import urllib.parse
+    fname = "靓号查询表_{}_{}.xlsx".format(
+        name.replace("/", "_").replace("\\", "_")[:40],
+        time.strftime("%Y%m%d_%H%M%S"))
+    quoted = urllib.parse.quote(fname)
+    return Response(data, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f"attachment; filename=export.xlsx; filename*=UTF-8''{quoted}"})
 
 
 # ---------- 随机二次元背景 ----------
@@ -477,6 +790,28 @@ PAGE = r"""<!DOCTYPE html>
   .qr-hint{font-size:11px;color:var(--faint);text-align:center}
   .modal-close{background:none;border:none;color:var(--dim);font-size:16px;cursor:pointer;padding:2px 6px}
   .modal-close:hover{color:#fff}
+  /* 类型选择分页网格（20/页） */
+  .rank-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;width:100%;
+             max-height:300px;overflow-y:auto;margin-top:12px}
+  .rank-grid button{padding:8px 4px;border-radius:8px;border:1px solid var(--line);
+                    background:rgba(90,70,150,.25);color:var(--ink);cursor:pointer;font-size:13px}
+  .rank-grid button:hover{border-color:var(--pink);color:#fff}
+  .rank-grid button.sel{border-color:var(--pink);background:rgba(255,143,196,.15);color:var(--pink)}
+  .rank-page{display:flex;justify-content:space-between;align-items:center;width:100%;margin-top:10px}
+  /* 导出进度条 */
+  .exp-bar{width:100%;height:10px;border-radius:5px;background:rgba(90,70,150,.35);
+           overflow:hidden;margin:14px 0 4px}
+  .exp-bar div{height:100%;width:0%;border-radius:5px;
+               background:linear-gradient(90deg,var(--pink),var(--violet));transition:width .3s}
+  /* 结果分页条（表格下方） */
+  #pagerBar{display:flex;align-items:center;gap:8px;padding:8px 14px;flex:0 0 auto;
+            border-top:1px solid rgba(255,255,255,.07);flex-wrap:wrap}
+  .page-num{min-width:30px;padding:4px 8px;border-radius:7px;border:1px solid var(--line);
+            background:rgba(90,70,150,.25);color:var(--ink);cursor:pointer;font-size:12.5px}
+  .page-num:hover{border-color:var(--pink);color:#fff}
+  .page-num.on{background:linear-gradient(135deg,var(--pink),var(--purple));color:#fff;
+               border-color:transparent;font-weight:600}
+  .page-gap{color:var(--faint);padding:0 3px;font-size:12.5px}
   /* 套餐选择弹窗 */
   .pkg-top{width:100%;display:flex;justify-content:space-between;align-items:center;font-size:13px}
   .pkg-pre{color:var(--pink);font-weight:700;font-size:13px}
@@ -599,7 +934,8 @@ PAGE = r"""<!DOCTYPE html>
         </select>
         <label>省份</label><select id="province"><option value="">— 加载省份 —</option></select>
         <label>城市</label><select id="city"><option value="">全部</option></select>
-        <label>等级</label><select id="rank"><option value="">不限</option></select>
+        <label>类型</label><button type="button" class="pill ghost" id="btnRank" style="padding:6px 14px">不限</button>
+        <label>号码搜索</label><input id="msisdn" type="text" maxlength="11" placeholder="如：4 或 138" title="号码关键词，可单独或与地区/等级组合" style="width:92px">
         <label>页数</label><input id="maxPages" type="number" value="50" min="1" max="500" style="width:64px">
         <label>间隔s</label><input id="interval" type="number" value="2" min="1" max="60" style="width:52px">
         <span class="hint" title="间隔过小会对服务器造成压力，可能被拉入 IP 黑名单">⚠ 建议 ≥2s（最小 1s）</span>
@@ -610,7 +946,12 @@ PAGE = r"""<!DOCTYPE html>
         <button class="pill" id="btnStart">▶ 开始查询</button>
         <button class="pill ghost" id="btnStop" disabled>■ 停止</button>
         <button class="pill ghost" id="btnClear">清空</button>
-        <button class="pill ghost" id="btnExport">⬇ 导出 Excel</button>
+        <button class="pill ghost" id="btnExport">⬇ 导出</button>
+        <select id="expFmt" title="导出格式：DuckDB 入库（推荐，可到「数据库管理」查看）/ Excel / CSV">
+          <option value="duckdb">→ DuckDB 入库</option>
+          <option value="xlsx">Excel (xlsx)</option>
+          <option value="csv">CSV</option>
+        </select>
         <label class="hint" style="cursor:pointer"><input type="checkbox" id="expMore"> 附带更多套餐(套餐2/3)</label>
         <span class="hint" id="counter"></span>
       </div>
@@ -621,6 +962,15 @@ PAGE = r"""<!DOCTYPE html>
           <tbody id="lhBody"></tbody>
         </table>
         <div class="empty" id="lhEmpty">点击「开始查询」获取号码；页面支持右键复制。</div>
+        <div id="pagerBar" style="display:none">
+          <button class="pill ghost" id="pageFirst" style="padding:4px 14px">« 首页</button>
+          <button class="pill ghost" id="pagePrev" style="padding:4px 14px">‹ 上一页</button>
+          <span id="pageNums"></span>
+          <button class="pill ghost" id="pageNext" style="padding:4px 14px">下一页 ›</button>
+          <button class="pill ghost" id="pageLast" style="padding:4px 14px">末页 »</button>
+          <span class="hint" style="margin-left:0" id="pageInfo">共 0 条（每页 20）</span>
+          <span class="hint" style="margin-left:auto">导出包含全部数据</span>
+        </div>
       </div>
     </section>
 
@@ -667,6 +1017,20 @@ PAGE = r"""<!DOCTYPE html>
     项目源码：<a href="https://github.com/xiazhimiao/ms170-reverse-lab" target="_blank">ms170-reverse-lab</a></div>
 </div>
 
+<!-- 类型选择弹窗（分页列表 20/页，替代下拉框） -->
+<div class="modal-mask" id="rankMask" style="display:none">
+  <div class="modal glass" style="max-width:560px">
+    <div class="modal-head"><span>🎯 选择号码类型</span><button class="modal-close" id="rankClose">✕</button></div>
+    <div id="rankGrid" class="rank-grid"></div>
+    <div class="rank-page">
+      <button class="pill ghost" id="rankPrev" style="padding:5px 14px">← 上一页</button>
+      <span class="hint" id="rankPageNo" style="margin-left:0"></span>
+      <button class="pill ghost" id="rankNext" style="padding:5px 14px">下一页 →</button>
+    </div>
+    <button class="pill ghost" id="rankNone" style="margin-top:12px">不限（全部类型）</button>
+  </div>
+</div>
+
 <!-- 套餐选择弹窗（复刻小程序：号码 → 预存 → 默认套餐 → 立即办理/更多套餐 → 下一步） -->
 <div class="modal-mask" id="pkgMask" style="display:none">
   <div class="modal glass" style="max-width:560px">
@@ -694,6 +1058,15 @@ PAGE = r"""<!DOCTYPE html>
     <div class="pkg-desc" id="cfmDesc"></div>
     <button class="pill" id="cfmGo" style="margin-top:14px">确认订阅</button>
     <p class="qr-hint">下单与支付需在「民生靓号」微信小程序内完成（本工具为查号演示，此按钮仅展示确认流程）</p>
+  </div>
+</div>
+
+<!-- 导出进度弹窗（勾选「附带更多套餐」时异步导出，拉取套餐耗时） -->
+<div class="modal-mask" id="expMask" style="display:none">
+  <div class="modal glass" style="max-width:420px">
+    <div class="modal-head"><span>📤 导出中</span></div>
+    <div class="exp-bar"><div id="expBar"></div></div>
+    <p class="qr-hint" id="expText">正在准备导出...</p>
   </div>
 </div>
 
@@ -777,30 +1150,82 @@ function connectSSE(){
   es.onerror = () => {}; // EventSource 自动重连
 }
 
-/* ---------- 靓号查询 ---------- */
-function addLhRows(rows){
-  const tb = $('lhBody'), empty = $('lhEmpty');
-  empty.style.display = 'none';
-  rows.forEach(r => {
-    const tr = document.createElement('tr');
-    tr.dataset.phone = r.phone_number;
-    tr.dataset.row = JSON.stringify(r);
-    tr.onclick = () => openPackageChoose(r);
-    const yuan = v => (v || 0) / 100;
-    [r.index, r.phone_number, r.province, r.city, r.rank,
-     yuan(r.bossPrestore), yuan(r.minConsume), r.productName || '—'].forEach(v => {
-      const td = document.createElement('td'); td.textContent = v; tr.appendChild(td);
-    });
-    const td = document.createElement('td');
-    const btn = document.createElement('button');
-    btn.className = 'mini';
-    btn.textContent = '办理';
-    btn.onclick = e => { e.stopPropagation(); openPackageChoose(r); };
-    td.appendChild(btn); tr.appendChild(td);
-    tb.appendChild(tr);
+/* ---------- 靓号查询（结果分页：每页 20 条，翻页浏览全部数据） ---------- */
+const PAGE_SIZE = 20;
+let lhPage = 1;        // 当前显示页
+let lhFollow = true;   // 跟随最新页（手动翻页离开末页后停止，回到末页恢复）
+
+function appendLhRow(r){
+  const tb = $('lhBody');
+  const tr = document.createElement('tr');
+  tr.dataset.phone = r.phone_number;
+  tr.dataset.row = JSON.stringify(r);
+  tr.onclick = () => openPackageChoose(r);
+  const yuan = v => (v || 0) / 100;
+  [r.index, r.phone_number, r.province, r.city, r.rank,
+   yuan(r.bossPrestore), yuan(r.minConsume), r.productName || '—'].forEach(v => {
+    const td = document.createElement('td'); td.textContent = v; tr.appendChild(td);
   });
+  const td = document.createElement('td');
+  const btn = document.createElement('button');
+  btn.className = 'mini';
+  btn.textContent = '办理';
+  btn.onclick = e => { e.stopPropagation(); openPackageChoose(r); };
+  td.appendChild(btn); tr.appendChild(td);
+  tb.appendChild(tr);
+}
+
+function totalLhPages(){ return Math.max(1, Math.ceil(lhRows.length / PAGE_SIZE)); }
+
+// 页码窗口：1 … (当前-2) (当前-1) 当前 (当前+1) (当前+2) … 末页；页数少时全部显示
+function pageNums(cur, total){
+  if (total <= 7) return Array.from({length: total}, (_, i) => ({n: i + 1}));
+  const set = new Set([1, total]);
+  for (let i = cur - 2; i <= cur + 2; i++) { if (i >= 1 && i <= total) set.add(i); }
+  const sorted = [...set].sort((a, b) => a - b);
+  const out = [];
+  let prev = 0;
+  for (const n of sorted) {
+    if (n - prev > 1) out.push({ell: true});   // 窗口与边界之间有缺口 → 省略号
+    out.push({n});
+    prev = n;
+  }
+  return out;
+}
+
+function renderLhPage(){
+  if (lhPage > totalLhPages()) lhPage = totalLhPages();
+  const rows = lhRows.slice((lhPage - 1) * PAGE_SIZE, lhPage * PAGE_SIZE);
+  $('lhBody').innerHTML = '';
+  $('lhEmpty').style.display = rows.length ? 'none' : '';
+  rows.forEach(appendLhRow);
+  const total = totalLhPages();
+  $('pageInfo').textContent = '共 ' + lhRows.length + ' 条（每页 ' + PAGE_SIZE + '）';
+  $('pageFirst').disabled = lhPage <= 1;
+  $('pagePrev').disabled = lhPage <= 1;
+  $('pageNext').disabled = lhPage >= total;
+  $('pageLast').disabled = lhPage >= total;
+  $('pageNums').innerHTML = pageNums(lhPage, total).map(x => x.ell
+    ? '<span class="page-gap">…</span>'
+    : `<button class="page-num${x.n === lhPage ? ' on' : ''}" data-n="${x.n}">${x.n}</button>`).join('');
+  Array.from($('pageNums').children).forEach(b => b.onclick = () => {
+    lhPage = parseInt(b.dataset.n, 10);
+    lhFollow = lhPage >= totalLhPages();
+    renderLhPage();
+  });
+  $('pagerBar').style.display = lhRows.length ? 'flex' : 'none';
+}
+$('pageFirst').onclick = () => { lhPage = 1; lhFollow = false; renderLhPage(); };
+$('pagePrev').onclick = () => { lhPage--; lhFollow = lhPage >= totalLhPages(); renderLhPage(); };
+$('pageNext').onclick = () => { lhPage++; lhFollow = lhPage >= totalLhPages(); renderLhPage(); };
+$('pageLast').onclick = () => { lhPage = totalLhPages(); lhFollow = true; renderLhPage(); };
+
+function addLhRows(rows){
   lhRows = lhRows.concat(rows);
   $('counter').textContent = '已获取 ' + lhRows.length + ' 条';
+  // 跟随最新：未手动翻页（或已在末页）时，新数据到达自动翻到最新页
+  if (lhFollow) lhPage = totalLhPages();
+  renderLhPage();
 }
 // 右键复制号码
 $('lhBody').addEventListener('contextmenu', e => {
@@ -841,7 +1266,8 @@ async function startQuery(){
     series: $('series').value,
     province: $('province').value,
     city: $('city').value,
-    rank: $('rank').value,
+    rank: rankSel,
+    msisdn: $('msisdn').value.trim(),
     max_pages: parseInt($('maxPages').value || '0', 10),
     interval: parseFloat($('interval').value || '2')
   };
@@ -851,33 +1277,29 @@ async function startQuery(){
   })).json();
   if (r.code) { log('error', r.msg); return; }
   setRunning(true); setStatus('查询启动...');
-  log('info', '开始查询: ' + params.series + (params.rank ? ' · 等级 ' + params.rank : ''));
+  const conds = [params.series, rankSel ? '类型 ' + rankSel : '',
+                 params.msisdn ? '号码含 ' + params.msisdn : ''].filter(Boolean).join(' · ');
+  log('info', '开始查询: ' + conds);
 }
 $('btnStart').onclick = startQuery;
 $('btnStop').onclick = async () => { await fetch('/api/query/stop', {method:'POST'}); };
 $('btnClear').onclick = () => {
-  $('lhBody').innerHTML = '';
   lhRows = [];
-  $('lhEmpty').style.display = '';
+  lhPage = 1;
+  lhFollow = true;
+  renderLhPage();
   $('counter').textContent = '';
   log('info', '已清空');
 };
 
-async function exportRows(fmt){
-  if (!lhRows.length) { log('error', '没有可导出的数据'); return; }
-  const more = $('expMore').checked;
-  if (more) log('info', '正在拉取更多套餐（' + lhRows.length + ' 个号码）...');
-  const provSel = $('province').selectedOptions[0];
-  const citySel = $('city').selectedOptions[0];
-  const fnameInfo = (provSel ? provSel.textContent : '全国') + '_' + (citySel ? citySel.textContent : '全部');
-  const r = await fetch('/api/export', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({rows: lhRows.map(r => [r.index, r.phone_number, r.province, r.city, r.rank,
-      yuan(r.bossPrestore), yuan(r.minConsume), r.productName || '',
-      yuan(r.productFee), r.liuTotal || '', r.callTotal || '', r.package || '']),
-      fmt, more, fname_info: fnameInfo})
-  });
-  if (!r.ok) { log('error', '导出失败'); return; }
+function buildExportRows(){
+  return lhRows.map(r => [r.index, r.phone_number, r.province, r.city, r.rank,
+    yuan(r.bossPrestore), yuan(r.minConsume), r.productName || '',
+    yuan(r.productFee), r.liuTotal || '', r.callTotal || '', r.package || '']);
+}
+
+// 保存导出文件（复用下载响应 → 解析后端文件名 → 触发下载）
+async function saveBlob(r, fmt){
   const blob = await r.blob();
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -889,9 +1311,67 @@ async function exportRows(fmt){
   a.download = fname;
   a.click();
   URL.revokeObjectURL(a.href);
+  return fname;
+}
+
+async function exportRows(){
+  if (!lhRows.length) { log('error', '没有可导出的数据'); return; }
+  const fmt = $('expFmt').value;   // duckdb / xlsx / csv
+  const more = $('expMore').checked;
+  const provSel = $('province').selectedOptions[0];
+  const citySel = $('city').selectedOptions[0];
+  const fnameInfo = (provSel ? provSel.textContent : '全国') + '_' + (citySel ? citySel.textContent : '全部');
+  const body = {rows: buildExportRows(), fmt, more, fname_info: fnameInfo};
+  const dbHint = t => '已写入 duckdb：表 ' + t + '（可在 数据库管理 查看）';
+  if (more) {
+    // 附带更多套餐：每个号码都要并发拉套餐，耗时较长 → 后台任务 + 进度条轮询
+    log('info', '正在拉取更多套餐（' + lhRows.length + ' 个号码）...');
+    const r = await fetch('/api/export', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    if (!r.ok) { log('error', '导出失败'); return; }
+    const j = await r.json();
+    if (j.code || !j.task) { log('error', j.msg || '导出失败'); return; }
+    $('expMask').style.display = 'flex';
+    const task = j.task;
+    try {
+      while (true) {
+        await new Promise(s => setTimeout(s, 500));
+        const s = await (await fetch('/api/export/status?task=' + task)).json();
+        if (s.code) { log('error', s.msg); break; }
+        const pct = s.total ? Math.round(s.done / s.total * 100) : 0;
+        $('expBar').style.width = pct + '%';
+        $('expText').textContent = '正在拉取更多套餐 ' + s.done + '/' + s.total + '（' + pct + '%）';
+        if (s.status === 'done') {
+          if (fmt === 'duckdb') {
+            log('ok', dbHint(s.table));
+          } else {
+            $('expText').textContent = '文件生成中...';
+            const dl = await fetch('/api/export/download?task=' + task);
+            if (!dl.ok) { log('error', '导出文件下载失败'); break; }
+            const fname = await saveBlob(dl, fmt);
+            log('ok', '已导出 ' + lhRows.length + ' 条 → ' + fname);
+          }
+          break;
+        }
+        if (s.status === 'error') { log('error', '导出失败: ' + (s.error || '未知错误')); break; }
+      }
+    } finally { $('expMask').style.display = 'none'; }
+    return;
+  }
+  // 未勾选更多套餐：列表已加载，快
+  const r = await fetch('/api/export', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  if (!r.ok) { log('error', '导出失败'); return; }
+  if (fmt === 'duckdb') {
+    const j = await r.json();
+    if (j.code) { log('error', j.msg || '导出失败'); return; }
+    log('ok', dbHint(j.table));
+    return;
+  }
+  const fname = await saveBlob(r, fmt);
   log('ok', '已导出 ' + lhRows.length + ' 条 → ' + fname);
 }
-$('btnExport').onclick = () => exportRows('xlsx');
+$('btnExport').onclick = () => exportRows();
 
 /* ---------- 套餐选择 + 订单确认（复刻小程序 ActivityOptimization 流程） ---------- */
 let pkgRow = null;      // 当前号码行（含默认套餐信息）
@@ -1074,22 +1554,81 @@ document.querySelectorAll('.tab').forEach(tab => {
   };
 });
 
+/* ---------- 类型选择（分页列表 20/页，替代下拉框） ---------- */
+let rankList = [];   // 全部类型（rankList 接口动态 40 种）
+let rankPage = 1;    // 当前页
+let rankSel = '';    // 已选类型（'' = 不限）
+const RANK_PAGE = 20;
+
+function renderRankGrid(){
+  const start = (rankPage - 1) * RANK_PAGE;
+  const items = rankList.slice(start, start + RANK_PAGE);
+  $('rankGrid').innerHTML = items.map(r =>
+    `<button class="${r === rankSel ? 'sel' : ''}" data-v="${r}">${r}</button>`).join('');
+  Array.from($('rankGrid').children).forEach(b => b.onclick = () => {
+    rankSel = b.dataset.v;
+    $('btnRank').textContent = rankSel;
+    $('rankMask').style.display = 'none';
+    log('info', '已选类型: ' + rankSel);
+  });
+  const total = Math.ceil(rankList.length / RANK_PAGE) || 1;
+  $('rankPageNo').textContent = '第 ' + rankPage + '/' + total + ' 页 · 共 ' + rankList.length + ' 种';
+  $('rankPrev').disabled = rankPage <= 1;
+  $('rankNext').disabled = rankPage >= total;
+}
+$('btnRank').onclick = () => { rankPage = 1; renderRankGrid(); $('rankMask').style.display = 'flex'; };
+$('rankClose').onclick = () => $('rankMask').style.display = 'none';
+$('rankMask').onclick = e => { if (e.target === $('rankMask')) $('rankMask').style.display = 'none'; };
+$('rankPrev').onclick = () => { if (rankPage > 1) { rankPage--; renderRankGrid(); } };
+$('rankNext').onclick = () => { if (rankPage * RANK_PAGE < rankList.length) { rankPage++; renderRankGrid(); } };
+$('rankNone').onclick = () => {
+  rankSel = '';
+  $('btnRank').textContent = '不限';
+  $('rankMask').style.display = 'none';
+};
+
 /* ---------- 初始化 ---------- */
 (async () => {
-  // 等级列表（类型.txt 全量，原样展示）
+  // 类型列表（rankList 接口动态，失败回退类型.txt）
   try {
     const r = await (await fetch('/api/ranks')).json();
-    $('rank').innerHTML = '<option value="">不限</option>' +
-      r.data.map(x => `<option value="${x}">${x}</option>`).join('');
-    log('info', '等级 ' + r.data.length + ' 种: ' + r.data.join(' '));
-  } catch(e) {}
-  log('info', '靓号查询 v1.0.2 服务已连接，开始使用吧 ~');
+    if (r.code) throw new Error(r.msg);
+    rankList = r.data || [];
+    log('info', '类型 ' + rankList.length + ' 种: ' + rankList.join(' '));
+  } catch(e) {
+    log('error', '类型加载失败: ' + e.message);
+  }
+  log('info', '靓号查询 v1.0.6 服务已连接，开始使用吧 ~');
   connectSSE();
 })();
 </script>
 </body>
 </html>
 """
+
+
+# ---------- 数据库管理页（独立页面文件 db_page.html，专业 GUI + 工作流面板） ----------
+
+_DB_PAGE_CACHE = None
+
+
+def _get_db_page():
+    """读 db_page.html（与类型.txt 同模式，PyInstaller onefile 下 __file__→_MEIPASS）"""
+    global _DB_PAGE_CACHE
+    if _DB_PAGE_CACHE is None:
+        with open(os.path.join(BASE_DIR, "db_page.html"), encoding="utf-8") as f:
+            _DB_PAGE_CACHE = f.read()
+    return _DB_PAGE_CACHE
+
+
+@app.route("/db")
+def render_db_page():
+    return Response(_get_db_page(), mimetype="text/html")
+
+
+@app.route("/api/db/path")
+def api_db_path():
+    return jsonify({"code": 0, "path": duckdb_store.get_db_path()})
 
 
 def render_index():
@@ -1154,6 +1693,7 @@ def main():
         "ms_lianghao", _make_tray_icon(), "民生靓号查询",
         menu=pystray.Menu(
             pystray.MenuItem("打开界面", lambda: webbrowser.open(url)),
+            pystray.MenuItem("数据库管理", lambda: webbrowser.open(url + "db")),
             pystray.MenuItem("退出", lambda: icon.stop()),
         ),
     )

@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>数据库管理 · 民生靓号查询</title>
+<style>
+  :root{--pink:#ff8fc4;--purple:#8e5ad8;--violet:#b36bff;--ink:#f3f0ff;--dim:#c9c2e6;
+        --faint:#8b84ad;--card:rgba(28,18,58,.55);--glass:rgba(24,14,48,.82);
+        --glass-strong:rgba(18,10,38,.94);--line:rgba(255,255,255,.10);
+        --row:rgba(255,255,255,.04);--alpha-glass:.5}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,"Microsoft YaHei",sans-serif;background:#120b26;color:var(--ink);
+       height:100vh;overflow:hidden}
+  .bg{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:-2;transition:opacity .6s}
+  .bg.fade{opacity:0}
+  .veil{position:fixed;inset:0;z-index:-1;background:
+        linear-gradient(180deg,rgba(16,10,34,.5),rgba(16,10,34,.95) 55%,rgba(12,8,28,.98))}
+  .app{height:100vh;display:flex;flex-direction:column;gap:10px;padding:12px 16px;max-width:1440px;margin:0 auto}
+  .glass{background:var(--glass);backdrop-filter:blur(22px) saturate(150%);
+         -webkit-backdrop-filter:blur(22px) saturate(150%);
+         border:1px solid var(--line);border-radius:14px;
+         box-shadow:0 8px 32px rgba(0,0,0,.35)}
+  /* 顶栏 */
+  header{display:flex;align-items:center;gap:12px;padding:10px 16px;flex:0 0 auto;flex-wrap:wrap}
+  header h1{font-size:16px;font-weight:700;white-space:nowrap}
+  header h1 em{font-style:normal;background:linear-gradient(90deg,var(--pink),var(--violet));
+               -webkit-background-clip:text;background-clip:text;color:transparent}
+  .path{font-size:11.5px;color:var(--faint);flex:1;min-width:200px;overflow:hidden;
+        text-overflow:ellipsis;white-space:nowrap}
+  .pill{background:linear-gradient(135deg,var(--pink),var(--purple));border:none;color:#fff;
+        border-radius:999px;padding:6px 16px;font-size:12.5px;cursor:pointer;
+        box-shadow:0 4px 14px rgba(142,90,216,.45)}
+  .pill:hover{filter:brightness(1.12)}
+  .pill:disabled{opacity:.45;cursor:not-allowed;filter:none}
+  .pill.ghost{background:rgba(90,70,150,.45);box-shadow:none;border:1px solid var(--line)}
+  a.pill{text-decoration:none}
+  /* 开关 */
+  .sw{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);cursor:pointer;
+      padding:4px 12px;border:1px solid var(--line);border-radius:999px;background:rgba(90,70,150,.25)}
+  .sw input{accent-color:var(--pink)}
+  .sw.on{color:#fff;border-color:var(--pink);background:rgba(255,143,196,.15)}
+  /* 布局 */
+  .layout{flex:1;display:flex;gap:10px;min-height:0}
+  aside{width:240px;flex:0 0 auto;display:flex;flex-direction:column;min-height:0}
+  .side-head{padding:10px 14px;font-size:12px;color:var(--faint);
+             border-bottom:1px solid rgba(255,255,255,.07);display:flex;justify-content:space-between}
+  .tlist{flex:1;overflow-y:auto;padding:8px}
+  .tcard{padding:9px 12px;border-radius:10px;cursor:pointer;border:1px solid transparent;
+         margin-bottom:6px;background:var(--card)}
+  .tcard:hover{border-color:var(--purple)}
+  .tcard.on{border-color:var(--pink);background:rgba(255,143,196,.12)}
+  .tcard .n{font-size:12.5px;font-weight:600;word-break:break-all}
+  .tcard .m{font-size:11px;color:var(--faint);margin-top:3px}
+  .tcard .m b{color:var(--pink)}
+  main{flex:1;display:flex;flex-direction:column;min-height:0}
+  /* 主区头 */
+  .dhead{display:flex;align-items:center;gap:10px;padding:9px 14px;flex:0 0 auto;flex-wrap:wrap;
+         border-bottom:1px solid rgba(255,255,255,.07)}
+  .dhead .tname{font-size:13.5px;font-weight:700;word-break:break-all}
+  .dhead .meta{font-size:11.5px;color:var(--faint)}
+  .dhead .sp{flex:1}
+  /* 列工具条 */
+  .toolbar{display:flex;align-items:center;gap:6px;padding:7px 14px;flex:0 0 auto;flex-wrap:wrap;
+           border-bottom:1px solid rgba(255,255,255,.07)}
+  .toolbar .lbl{font-size:11.5px;color:var(--faint)}
+  .toolbar .colname{font-size:12px;color:var(--pink);font-weight:600;max-width:130px;
+                    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mini{background:linear-gradient(135deg,var(--pink),var(--purple));border:none;color:#fff;
+        border-radius:7px;padding:4px 10px;font-size:11.5px;cursor:pointer}
+  .mini.ghost{background:rgba(90,70,150,.4);border:1px solid var(--line)}
+  .mini:disabled{opacity:.4;cursor:not-allowed}
+  .mini:hover:not(:disabled){filter:brightness(1.12)}
+  /* 数据表 */
+  .tblwrap{flex:1;overflow:auto;min-height:0}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  thead th{position:sticky;top:0;background:var(--glass-strong);color:var(--pink);
+           font-weight:600;padding:7px 10px;text-align:left;white-space:nowrap;cursor:pointer;
+           border-bottom:1px solid var(--line);z-index:1;user-select:none}
+  thead th:hover{background:rgba(142,90,216,.3)}
+  thead th.sel{background:rgba(255,143,196,.22);color:#fff;box-shadow:inset 0 -2px 0 var(--pink)}
+  thead th .caret{font-size:9px;color:var(--faint);margin-left:4px}
+  tbody td{padding:5px 10px;border-top:1px solid rgba(255,255,255,.06);white-space:nowrap;
+           max-width:380px;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+  tbody td:hover{background:rgba(142,90,216,.25)}
+  tbody tr:nth-child(even){background:var(--row)}
+  td.editing{background:rgba(255,143,196,.18)}
+  td input.cellin{width:100%;min-width:80px;background:rgba(20,13,42,.9);color:var(--ink);
+                  border:1px solid var(--pink);border-radius:6px;padding:3px 6px;font-size:12px;outline:none}
+  .empty{padding:40px;text-align:center;color:var(--faint);font-size:13px}
+  /* 分页 */
+  .pager{display:flex;align-items:center;gap:8px;padding:7px 14px;flex:0 0 auto;flex-wrap:wrap;
+         border-top:1px solid rgba(255,255,255,.07);font-size:12px}
+  .pager .info{color:var(--dim)}
+  .page-num{min-width:28px;padding:3px 8px;border-radius:6px;border:1px solid var(--line);
+            background:rgba(90,70,150,.25);color:var(--ink);cursor:pointer;font-size:11.5px}
+  .page-num.on{background:linear-gradient(135deg,var(--pink),var(--purple));color:#fff;
+               border-color:transparent;font-weight:600}
+  .page-gap{color:var(--faint);padding:0 2px}
+  /* 日志面板（拖标题栏可调整高度；收拢只留标题栏） */
+  .logpanel{flex:0 0 auto;display:flex;flex-direction:column;min-height:34px;height:130px;
+            border-top:1px solid rgba(255,255,255,.07)}
+  .logpanel.collapsed{height:34px}
+  .logpanel.collapsed .logbody{display:none}
+  .log-head{flex:0 0 25px;display:flex;align-items:center;gap:10px;padding:0 14px;
+            font-size:11.5px;color:var(--dim);cursor:ns-resize;user-select:none;
+            background:rgba(90,70,150,.18);border-bottom:1px solid rgba(255,255,255,.06)}
+  .log-head .lbl{font-weight:600;color:var(--ink)}
+  .log-head .cnt{color:var(--faint);font-size:10.5px}
+  .log-head .mini{padding:2px 8px;font-size:10.5px;cursor:pointer}
+  .logbody{flex:1;overflow-y:auto;padding:5px 14px 8px;font-size:11.5px;line-height:1.5;
+           display:flex;flex-direction:column;gap:2px}
+  .logline{color:var(--dim);word-break:break-all;white-space:pre-wrap}
+  .logline .t{color:var(--faint);margin-right:8px;font-size:10.5px}
+  .logline.ok{color:#7ce7b0}
+  .logline.error{color:#ff8fa3}
+  .logline.info{color:#cfe0ff}
+  /* 弹窗 */
+  .modal-mask{position:fixed;inset:0;background:rgba(10,6,24,.6);z-index:50;
+              display:flex;align-items:center;justify-content:center;
+              backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+  .modal{width:720px;max-width:94vw;max-height:88vh;display:flex;flex-direction:column;padding:16px 18px;gap:12px}
+  .modal-head{display:flex;justify-content:space-between;align-items:center;font-weight:600;font-size:14px}
+  .modal-close{background:none;border:none;color:var(--dim);font-size:17px;cursor:pointer;padding:2px 7px}
+  .modal-close:hover{color:#fff}
+  .wf-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .wf-row label{font-size:12px;color:var(--dim);white-space:nowrap}
+  .wf-row input,.wf-row select{background:rgba(20,13,42,.85);color:var(--ink);border:1px solid var(--line);
+                               border-radius:8px;padding:5px 9px;font-size:12.5px;outline:none}
+  .wf-row input:focus,.wf-row select:focus{border-color:var(--purple)}
+  .wf-row input[type=text]{width:200px}
+  .wf-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;min-height:120px}
+  .wf-step{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:9px;
+           background:var(--card);border:1px solid var(--line);font-size:12px}
+  .wf-step .no{color:var(--faint);min-width:18px;text-align:right}
+  .wf-step .desc{flex:1}
+  .wf-step .st{font-size:10.5px;padding:1px 7px;border-radius:999px}
+  .wf-step .st.ok{background:rgba(124,231,176,.15);color:#7ce7b0}
+  .wf-step .st.bad{background:rgba(255,143,163,.15);color:#ff8fa3}
+  .wf-step button{background:none;border:none;color:var(--faint);cursor:pointer;font-size:13px;padding:1px 4px}
+  .wf-step button:hover{color:#ff8fa3}
+  .wf-step button.up:hover,.wf-step button.dn:hover{color:var(--pink)}
+  .wf-add{display:flex;gap:8px;flex-wrap:wrap;align-items:center;border-top:1px solid rgba(255,255,255,.08);
+          padding-top:10px}
+  .wf-add select{background:rgba(20,13,42,.85);color:var(--ink);border:1px solid var(--line);
+                 border-radius:8px;padding:5px 9px;font-size:12.5px}
+  .wf-add input{background:rgba(20,13,42,.85);color:var(--ink);border:1px solid var(--line);
+                border-radius:8px;padding:5px 9px;font-size:12.5px;outline:none;width:150px}
+  .wf-add input:focus{border-color:var(--purple)}
+  .wf-add .phint{font-size:10.5px;color:var(--faint)}
+  .wf-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,.08);padding-top:10px}
+  .wf-actions .note{font-size:11px;color:var(--faint);flex:1}
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:rgba(142,90,216,.55);border-radius:5px}
+  ::-webkit-scrollbar-track{background:rgba(0,0,0,.2)}
+</style>
+</head>
+<body>
+<img id="bg" class="bg" alt="" src="/api/bg">
+<div class="veil"></div>
+
+<div class="app">
+  <header class="glass">
+    <h1><em>🗄 数据库管理</em></h1>
+    <span class="path" id="dbPath">加载中...</span>
+    <button class="pill ghost" id="btnBg">🎨 换背景</button>
+    <label class="sw" id="wfSw" title="启用后：每次导出写入 duckdb 的新表自动执行工作流">
+      <input type="checkbox" id="wfActiveCk"> 工作流
+    </label>
+    <button class="pill ghost" id="btnWf">⚙ 工作流设置</button>
+    <button class="pill ghost" id="btnExpXlsx">⬇ 导出 Excel</button>
+    <a href="/" class="pill ghost">← 返回查询页</a>
+    <button class="pill" id="btnRefresh">↻ 刷新</button>
+  </header>
+
+  <div class="layout">
+    <aside class="glass">
+      <div class="side-head"><span>数据表</span><span id="tcount"></span></div>
+      <div class="tlist" id="tableList"><div class="empty">加载中...</div></div>
+    </aside>
+    <main class="glass">
+      <div class="dhead">
+        <span class="tname" id="detName">— 未选择表 —</span>
+        <span class="meta" id="detMeta"></span>
+        <span class="sp"></span>
+      </div>
+      <div class="toolbar" id="toolbar" style="display:none">
+        <span class="lbl">列:</span><span class="colname" id="selColName">未选择</span>
+        <button class="mini" id="tbSet">整列替换</button>
+        <button class="mini ghost" id="tbAppend">末尾追加</button>
+        <button class="mini ghost" id="tbPrepend">开头插入</button>
+        <button class="mini ghost" id="tbReplace">查找替换</button>
+        <button class="mini ghost" id="tbCopy">复制列</button>
+        <button class="mini ghost" id="tbRename">重命名</button>
+        <button class="mini" id="tbDrop" style="background:rgba(255,80,120,.75)">删除列</button>
+        <span class="lbl" style="margin-left:10px">行:</span>
+        <button class="mini ghost" id="tbDelRows">删除匹配行</button>
+        <button class="mini ghost" id="tbSetIf">条件置值</button>
+        <button class="mini ghost" id="tbAddCol">＋ 新增列</button>
+      </div>
+      <div class="tblwrap" id="tblwrap"><div class="empty">从左侧选择一张表；没有表时先回查询页导出（选择 DuckDB 入库）。</div></div>
+      <div class="pager" id="pager" style="display:none">
+        <button class="pill ghost" id="pgFirst" style="padding:3px 10px">« 首页</button>
+        <button class="pill ghost" id="pgPrev" style="padding:3px 10px">‹ 上一页</button>
+        <span id="pgNums"></span>
+        <button class="pill ghost" id="pgNext" style="padding:3px 10px">下一页 ›</button>
+        <button class="pill ghost" id="pgLast" style="padding:3px 10px">末页 »</button>
+        <span class="info" id="pgInfo"></span>
+      </div>
+      <div class="logpanel glass" id="logpanel">
+        <div class="log-head" id="logHead" title="拖拽调整高度">
+          <span class="lbl">📋 操作日志</span>
+          <span class="cnt" id="logCnt">0 条</span>
+          <span style="flex:1"></span>
+          <button class="mini ghost" id="btnLogClear" title="清空日志">清空</button>
+          <button class="mini ghost" id="btnLogToggle" title="收起/展开">收起 ▾</button>
+        </div>
+        <div class="logbody" id="logbody"></div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- 工作流面板 -->
+<div class="modal-mask" id="wfMask" style="display:none">
+  <div class="modal glass">
+    <div class="modal-head"><span>⚙ 工作流设置</span><button class="modal-close" id="wfClose">✕</button></div>
+    <div class="wf-row">
+      <label>名称</label><input type="text" id="wfName" placeholder="例如：套餐详情清洗">
+      <label style="margin-left:14px">启用（新表自动执行）</label>
+      <label class="sw" style="padding:2px 10px"><input type="checkbox" id="wfActiveIn"> 开启</label>
+      <span style="flex:1"></span>
+      <button class="mini ghost" id="wfDownload">⬇ 下载 JSON</button>
+      <button class="mini ghost" id="wfUploadBtn">⬆ 导入 JSON</button>
+      <input type="file" id="wfUploadFile" accept=".json,application/json" style="display:none">
+    </div>
+    <div class="wf-list" id="wfList"></div>
+    <div class="wf-add">
+      <select id="wfOpSel"></select>
+      <span id="wfParams"></span>
+      <button class="mini" id="wfAddStep">＋ 添加步骤</button>
+      <span class="phint">操作按顺序执行，可用「仅当 XX 含 XX」条件限定行</span>
+    </div>
+    <div class="wf-actions">
+      <button class="pill" id="wfSave">💾 保存工作流</button>
+      <button class="pill ghost" id="wfApply">▶ 立即应用到当前表</button>
+      <span class="note" id="wfNote">启用后：每次导出写入 duckdb 的新表自动执行；导出时可把工作流 JSON 发给对方，对方导入即懂处理逻辑。</span>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let curTable = '', tables = [], selCol = '', pgOffset = 0, pgSize = 100;
+let wfSteps = [], wfActive = false, wfName = '';
+let stepNo = 0;
+
+/* ---------- 日志面板（时间戳 + 颜色 + 自动滚底 + 拖拽调高） ---------- */
+function pad2(n){ return String(n).padStart(2, '0'); }
+function nowTs(){
+  const d = new Date();
+  return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+}
+function log(cls, msg){
+  if (msg === undefined) { msg = cls; cls = 'info'; }  // 兼容 log(单参数)
+  const body = $('logbody');
+  const line = document.createElement('div');
+  line.className = 'logline ' + cls;
+  line.innerHTML = '<span class="t">' + nowTs() + '</span>' + esc(msg);
+  body.appendChild(line);
+  body.scrollTop = body.scrollHeight;
+  const n = body.children.length;
+  $('logCnt').textContent = n + ' 条';
+  while (body.children.length > 200) body.removeChild(body.firstChild);
+}
+$('btnLogClear').onclick = () => {
+  $('logbody').innerHTML = '';
+  $('logCnt').textContent = '0 条';
+};
+$('btnLogToggle').onclick = () => {
+  const p = $('logpanel');
+  p.classList.toggle('collapsed');
+  $('btnLogToggle').textContent = p.classList.contains('collapsed') ? '展开 ▴' : '收起 ▾';
+};
+// 拖标题栏调整面板高度（34px ~ 60vh），按钮区不启动拖拽
+(function(){
+  const p = $('logpanel'), head = $('logHead');
+  let dragging = false, startY = 0, startH = 0;
+  head.addEventListener('mousedown', e => {
+    if (e.target.closest('button')) return;
+    dragging = true; startY = e.clientY; startH = p.offsetHeight;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const h = Math.min(Math.max(startH + (startY - e.clientY), 34), window.innerHeight * 0.6);
+    p.style.height = h + 'px';
+    p.classList.remove('collapsed');
+  });
+  document.addEventListener('mouseup', () => { dragging = false; });
+})();
+
+/* ---------- 背景（与查询页一致：API 图 + 轮询） ---------- */
+const bg = $('bg');
+function setBg(src){
+  bg.classList.add('fade');
+  bg.onload = () => bg.classList.remove('fade');
+  bg.onerror = () => { bg.src = '/api/bg'; bg.classList.remove('fade'); };
+  bg.src = src;
+}
+$('btnBg').onclick = async () => {
+  $('btnBg').disabled = true;
+  try { await fetch('/api/bg/refresh'); setBg('/api/bg?' + Date.now()); } catch(e) {}
+  setTimeout(() => $('btnBg').disabled = false, 20000);
+};
+let bgTs = 0;
+async function pollBg(){
+  try {
+    const r = await (await fetch('/api/bg/ts')).json();
+    if (r.ts && r.ts !== bgTs) { bgTs = r.ts; setBg('/api/bg?' + r.ts); }
+  } catch(e) {}
+}
+setInterval(pollBg, 1500);
+
+/* ---------- 表列表 ---------- */
+async function refresh(){
+  const r = await (await fetch('/api/db/tables')).json();
+  tables = r.data || [];
+  if (curTable && !tables.some(t => t.name === curTable)) curTable = '';
+  renderList();
+  if (curTable) loadTable(curTable);
+}
+function renderList(){
+  const box = $('tableList');
+  $('tcount').textContent = tables.length + ' 张';
+  if (!tables.length) {
+    box.innerHTML = '<div class="empty">还没有表<br><br>回到查询页 → 导出<br>选择「DuckDB 入库」即可建表</div>';
+    return;
+  }
+  box.innerHTML = tables.map(t =>
+    `<div class="tcard${t.name === curTable ? ' on' : ''}" data-n="${t.name}">
+       <div class="n">📊 ${t.name}</div>
+       <div class="m"><b>${t.rows}</b> 行 · ${t.cols} 列</div>
+     </div>`).join('');
+  Array.from(box.children).forEach(c => c.onclick = () => { curTable = c.dataset.n; renderList(); loadTable(curTable); });
+}
+
+/* ---------- 表数据 ---------- */
+async function loadTable(name){
+  selCol = ''; pgOffset = 0;
+  $('selColName').textContent = '未选择';
+  $('detName').textContent = '📊 ' + name;
+  const r = await (await fetch('/api/db/table?name=' + encodeURIComponent(name))).json();
+  if (r.code) { $('detMeta').textContent = r.msg; return; }
+  $('detMeta').textContent = '共 ' + r.data.count + ' 行 · ' + r.data.columns.length + ' 列';
+  $('toolbar').style.display = 'flex';
+  loadPage();
+}
+async function loadPage(){
+  const r = await (await fetch('/api/db/data?name=' + encodeURIComponent(curTable) +
+    '&offset=' + pgOffset + '&limit=' + pgSize)).json();
+  if (r.code) { log('error', r.msg); return; }
+  const d = r.data;
+  const totalPages = Math.max(1, Math.ceil(d.total / pgSize));
+  if (pgOffset >= d.total && pgOffset > 0) { pgOffset = Math.max(0, d.total - pgSize); return loadPage(); }
+  const wrap = $('tblwrap');
+  if (!d.columns.length) { wrap.innerHTML = '<div class="empty">空表</div>'; return; }
+  let html = '<table><thead><tr>' + d.columns.map(c =>
+    `<th data-c="${c}" title="点击选择列 ${c}">${c}<span class="caret">▼</span></th>`).join('') + '</tr></thead><tbody>';
+  d.rows.forEach(row => {
+    html += '<tr>' + row.cells.map((v, i) =>
+      `<td data-id="${row.id}" data-c="${d.columns[i]}" title="点击编辑">${v === '' ? '—' : esc(v)}</td>`).join('') + '</tr>';
+  });
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+  // 表头选列
+  Array.from(wrap.querySelectorAll('th')).forEach(th => th.onclick = () => {
+    selCol = th.dataset.c;
+    $('selColName').textContent = selCol;
+    wrap.querySelectorAll('th').forEach(x => x.classList.remove('sel'));
+    th.classList.add('sel');
+  });
+  // 单元格点击编辑
+  Array.from(wrap.querySelectorAll('td[data-id]')).forEach(td => td.onclick = () => editCell(td));
+  // 分页
+  const cur = Math.floor(pgOffset / pgSize) + 1;
+  $('pgInfo').textContent = `第 ${cur}/${totalPages} 页 · 共 ${d.total} 行（每页 ${pgSize}）`;
+  $('pgFirst').disabled = pgOffset <= 0;
+  $('pgPrev').disabled = pgOffset <= 0;
+  $('pgNext').disabled = pgOffset + pgSize >= d.total;
+  $('pgLast').disabled = pgOffset + pgSize >= d.total;
+  $('pgNums').innerHTML = pageNums(cur, totalPages).map(x => x.ell
+    ? '<span class="page-gap">…</span>'
+    : `<button class="page-num${x.n === cur ? ' on' : ''}" data-n="${x.n}">${x.n}</button>`).join('');
+  Array.from($('pgNums').children).forEach(b => b.onclick = () => {
+    pgOffset = (parseInt(b.dataset.n, 10) - 1) * pgSize; loadPage();
+  });
+  $('pager').style.display = 'flex';
+}
+$('pgFirst').onclick = () => { pgOffset = 0; loadPage(); };
+$('pgPrev').onclick = () => { pgOffset = Math.max(0, pgOffset - pgSize); loadPage(); };
+$('pgNext').onclick = () => { if (pgOffset + pgSize < totalRows()) pgOffset += pgSize; loadPage(); };
+$('pgLast').onclick = () => { pgOffset = Math.max(0, Math.floor((totalRows() - 1) / pgSize)) * pgSize; loadPage(); };
+function totalRows(){ return parseInt(($('pgInfo').textContent.match(/共 (\d+) 行/) || [0, 0])[1], 10) || 0; }
+
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function pageNums(cur, total){
+  if (total <= 7) return Array.from({length: total}, (_, i) => ({n: i + 1}));
+  const set = new Set([1, total]);
+  for (let i = cur - 2; i <= cur + 2; i++) { if (i >= 1 && i <= total) set.add(i); }
+  const out = []; let prev = 0;
+  for (const n of [...set].sort((a, b) => a - b)) {
+    if (n - prev > 1) out.push({ell: true});
+    out.push({n}); prev = n;
+  }
+  return out;
+}
+
+/* ---------- 单元格编辑 ---------- */
+function editCell(td){
+  if (td.querySelector('input')) return;
+  const old = td.textContent.replace(/^—$/, '');
+  td.classList.add('editing');
+  td.innerHTML = `<input class="cellin" value="${esc(old)}">`;
+  const inp = td.querySelector('input');
+  inp.focus();
+  inp.select();
+  let done = false;
+  const save = async () => {
+    if (done) return; done = true;
+    const v = inp.value;
+    td.classList.remove('editing');
+    const r = await (await fetch('/api/db/edit', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name: curTable, rowid: td.dataset.id, column: td.dataset.c, value: v})})).json();
+    if (r.code) { log('error', r.msg); loadPage(); return; }
+    log('ok', `[${td.dataset.c}] 第${td.dataset.id}行 已改为 “${v}”`);
+    td.textContent = v === '' ? '—' : v;
+  };
+  const cancel = () => { if (done) return; done = true; td.classList.remove('editing'); loadPage(); };
+  inp.onkeydown = e => {
+    if (e.key === 'Enter') save();
+    else if (e.key === 'Escape') cancel();
+  };
+  inp.onblur = save;
+}
+
+/* ---------- 列/行操作 ---------- */
+async function opAct(op, extra, okMsg){
+  const r = await (await fetch('/api/db/op', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(Object.assign({name: curTable, op}, extra))})).json();
+  log(r.code ? 'error' : 'ok', r.msg || okMsg);
+  if (!r.code) { reloadMeta(); loadPage(); }
+}
+async function reloadMeta(){
+  const r = await (await fetch('/api/db/table?name=' + encodeURIComponent(curTable))).json();
+  if (!r.code) { $('detMeta').textContent = '共 ' + r.data.count + ' 行 · ' + r.data.columns.length + ' 列'; }
+  refresh();
+}
+
+$('tbSet').onclick = async () => {
+  const v = prompt(`整列替换：[${selCol}]\n输入新值（替换所有行）：`);
+  if (v === null) return;
+  opAct('set_column_value', {column: selCol, value: v});
+};
+$('tbAppend').onclick = async () => {
+  const v = prompt(`末尾追加：[${selCol}]\n输入要追加的文字：`);
+  if (v === null) return;
+  opAct('append_text', {column: selCol, text: v});
+};
+$('tbPrepend').onclick = async () => {
+  const v = prompt(`开头插入：[${selCol}]\n输入要插入的文字：`);
+  if (v === null) return;
+  opAct('prepend_text', {column: selCol, text: v});
+};
+$('tbReplace').onclick = async () => {
+  const a = prompt(`查找替换：[${selCol}]\n输入要查找的文字（或正则）：`);
+  if (a === null || a === '') return;
+  const b = prompt('替换为（留空 = 删除匹配文字）：', '');
+  if (b === null) return;
+  const regex = confirm('是否按正则表达式匹配？\n是=正则 否=普通文本');
+  opAct('replace_text', {column: selCol, pattern: a, replacement: b, regex});
+};
+$('tbCopy').onclick = async () => {
+  const t = prompt(`复制列：把 [${selCol}] 的值复制到新列\n输入新列名（不存在则自动创建）：`);
+  if (t === null || !t.trim()) return;
+  await opAct('add_column', {column: t, default: ''});
+  opAct('set_column_from', {target: t, source: selCol});
+};
+$('tbRename').onclick = async () => {
+  const n = prompt(`重命名列：[${selCol}] → 新列名：`);
+  if (n === null || !n.trim()) return;
+  opAct('rename_column', {old: selCol, column: n}, '列已重命名');
+};
+$('tbDrop').onclick = async () => {
+  if (!confirm(`确认删除列 [${selCol}]？此操作不可恢复！`)) return;
+  opAct('drop_column', {column: selCol}, '列已删除');
+};
+$('tbDelRows').onclick = async () => {
+  const kw = prompt(`删除匹配行：删除 [${selCol}] 值包含以下文字的所有行\n输入关键词（留空取消）：`);
+  if (kw === null || kw === '') return;
+  if (!confirm(`确认删除 [${selCol}] 包含 “${kw}” 的行？不可恢复！`)) return;
+  opAct('delete_rows_contains', {column: selCol, keyword: kw});
+};
+$('tbSetIf').onclick = async () => {
+  const kw = prompt(`条件置值：当 [${selCol}] 包含以下文字时\n输入关键词：`);
+  if (kw === null || kw === '') return;
+  const tgt = prompt('要修改的目标列名：');
+  if (tgt === null || !tgt.trim()) return;
+  const v = prompt(`把目标列设为（例如：true）：`, 'true');
+  if (v === null) return;
+  opAct('set_if_contains', {match_column: selCol, keyword: kw, target_column: tgt, value: v});
+};
+$('tbAddCol').onclick = async () => {
+  const n = prompt('新增列：输入列名：');
+  if (n === null || !n.trim()) return;
+  const d = prompt('默认值（留空为空）：', '');
+  if (d === null) return;
+  opAct('add_column', {column: n, default: d}, '列已创建');
+};
+
+/* ---------- 导出当前表 ---------- */
+$('btnExpXlsx').onclick = async () => {
+  if (!curTable) { log('error', '先选择一张表'); return; }
+  const r = await fetch('/api/db/export?name=' + encodeURIComponent(curTable));
+  if (!r.ok) { log('error', '导出失败'); return; }
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  let fname = curTable + '.xlsx';
+  const cd = r.headers.get('Content-Disposition') || '';
+  const m = cd.match(/filename\*=UTF-8''([^;]+)/);
+  if (m) { try { fname = decodeURIComponent(m[1]); } catch(e) {} }
+  a.download = fname; a.click(); URL.revokeObjectURL(a.href);
+  log('ok', '已导出 → ' + fname);
+};
+
+/* ---------- 工作流 ---------- */
+const WF_OPS = {
+  set_column:      {label:'整列替换', params:[['column','目标列'],['value','新值']]},
+  copy_column:     {label:'复制列到新列', params:[['source','来源列'],['target','新列名']]},
+  replace_text:    {label:'查找替换', params:[['column','列'],['pattern','查找'],['replacement','替换为'],['regex','正则勾选true',1]]},
+  append_text:     {label:'末尾追加', params:[['column','列'],['text','追加文字'],['match_column','条件列(空=全部)'],['match_keyword','条件包含(空=全部)']]},
+  prepend_text:    {label:'开头插入', params:[['column','列'],['text','插入文字'],['match_column','条件列(空=全部)'],['match_keyword','条件包含(空=全部)']]},
+  delete_rows:     {label:'删除匹配行', params:[['column','列'],['keyword','包含关键词']]},
+  set_if_contains: {label:'条件置值', params:[['match_column','匹配列'],['keyword','包含'],['target_column','目标列'],['value','设为(如 true)']]},
+  add_column:      {label:'新增列', params:[['column','列名'],['default','默认值(空=空)']]},
+  drop_column:     {label:'删除列', params:[['column','列名']]},
+  rename_column:   {label:'重命名列', params:[['old','原列名'],['column','新列名']]},
+};
+
+function renderWfOps(){
+  $('wfOpSel').innerHTML = Object.keys(WF_OPS).map(k =>
+    `<option value="${k}">${WF_OPS[k].label}</option>`).join('');
+  renderWfParams();
+}
+function renderWfParams(){
+  const op = $('wfOpSel').value;
+  $('wfParams').innerHTML = WF_OPS[op].params.map(p =>
+    `<input placeholder="${p[1]}" data-k="${p[0]}"${p[2] ? '' : ' value=""'}>`).join('');
+}
+$('wfOpSel').onchange = renderWfParams;
+
+$('wfAddStep').onclick = () => {
+  const op = $('wfOpSel').value;
+  const step = {op};
+  WF_OPS[op].params.forEach(p => {
+    const el = $('wfParams').querySelector(`input[data-k="${p[0]}"]`);
+    step[p[0]] = el.value.trim();
+  });
+  const need = WF_OPS[op].params.filter(p => !p[2]);
+  if (need.some(p => !step[p[0]])) { log('error', '请填写全部参数'); return; }
+  if (op === 'replace_text') step.regex = !!step.regex;
+  wfSteps.push(step);
+  renderWfList();
+  log('ok', '已添加步骤: ' + stepDesc(step));
+};
+
+function stepDesc(s){
+  const map = {
+    set_column: () => `整列 [${s.column}] 替换为 “${s.value}”`,
+    copy_column: () => `复制 [${s.source}] → [${s.target}]`,
+    replace_text: () => `[${s.column}] 替换 “${s.pattern}” → “${s.replacement || '空'}”`,
+    append_text: () => `[${s.column}] 末尾追加 “${s.text}”${s.match_keyword ? `（仅当 [${s.match_column}] 含 “${s.match_keyword}”）` : ''}`,
+    prepend_text: () => `[${s.column}] 开头插入 “${s.text}”${s.match_keyword ? `（仅当 [${s.match_column}] 含 “${s.match_keyword}”）` : ''}`,
+    delete_rows: () => `删除 [${s.column}] 含 “${s.keyword}” 的行`,
+    set_if_contains: () => `[${s.match_column}] 含 “${s.keyword}” → [${s.target_column}] = “${s.value}”`,
+    add_column: () => `新增列 [${s.column}]${s.default ? `（默认 “${s.default}”）` : ''}`,
+    drop_column: () => `删除列 [${s.column}]`,
+    rename_column: () => `重命名 [${s.old}] → [${s.column}]`,
+  };
+  return (map[s.op] || (() => '未知步骤'))();
+}
+
+function renderWfList(){
+  const box = $('wfList');
+  if (!wfSteps.length) { box.innerHTML = '<div class="empty">还没有步骤 —— 下方选择操作并添加</div>'; return; }
+  box.innerHTML = wfSteps.map((s, i) =>
+    `<div class="wf-step" data-i="${i}">
+       <span class="no">${i + 1}</span>
+       <span class="desc">${esc(stepDesc(s))}</span>
+       <button class="up" title="上移">↑</button>
+       <button class="dn" title="下移">↓</button>
+       <button class="del" title="删除">✕</button>
+     </div>`).join('');
+  Array.from(box.children).forEach(el => {
+    const i = parseInt(el.dataset.i, 10);
+    el.querySelector('.up').onclick = () => { if (i > 0) { [wfSteps[i-1], wfSteps[i]] = [wfSteps[i], wfSteps[i-1]]; renderWfList(); } };
+    el.querySelector('.dn').onclick = () => { if (i < wfSteps.length - 1) { [wfSteps[i], wfSteps[i+1]] = [wfSteps[i+1], wfSteps[i]]; renderWfList(); } };
+    el.querySelector('.del').onclick = () => { wfSteps.splice(i, 1); renderWfList(); };
+  });
+}
+
+$('btnWf').onclick = () => { $('wfMask').style.display = 'flex'; };
+$('wfClose').onclick = () => $('wfMask').style.display = 'none';
+$('wfMask').onclick = e => { if (e.target === $('wfMask')) $('wfMask').style.display = 'none'; };
+
+async function loadWf(){
+  const r = await (await fetch('/api/workflow')).json();
+  if (r.code) return;
+  wfSteps = (r.data.steps || []).map(s => Object.assign({}, s));
+  wfActive = !!r.data.active;
+  wfName = r.data.name || '';
+  $('wfName').value = wfName;
+  $('wfActiveIn').checked = wfActive;
+  $('wfActiveCk').checked = wfActive;
+  $('wfSw').classList.toggle('on', wfActive);
+  renderWfList();
+}
+$('wfActiveCk').onchange = async () => {
+  const on = $('wfActiveCk').checked;
+  $('wfSw').classList.toggle('on', on);
+  const r = await (await fetch('/api/workflow/toggle', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({active: on})})).json();
+  log(r.code ? 'error' : 'ok', r.msg);
+  wfActive = on;
+  $('wfActiveIn').checked = on;
+};
+$('wfActiveIn').onchange = () => { $('wfActiveCk').checked = $('wfActiveIn').checked; $('wfActiveCk').onchange(); };
+
+$('wfSave').onclick = async () => {
+  if (!wfSteps.length) { log('error', '工作流没有步骤'); return; }
+  const r = await (await fetch('/api/workflow', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name: $('wfName').value.trim(), active: $('wfActiveIn').checked, steps: wfSteps})})).json();
+  log(r.code ? 'error' : 'ok', r.msg);
+  if (!r.code) { wfActive = r.data.active; $('wfActiveCk').checked = wfActive; $('wfSw').classList.toggle('on', wfActive); }
+};
+
+$('wfApply').onclick = async () => {
+  if (!curTable) { log('error', '先选择一张表'); return; }
+  if (!wfSteps.length) { log('error', '工作流没有步骤'); return; }
+  const r = await (await fetch('/api/workflow/apply', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name: curTable, steps: wfSteps})})).json();
+  if (r.code) { log('error', r.msg); return; }
+  log(r.msg);
+  r.results.forEach(x => log(x.ok ? 'ok' : 'error', (x.ok ? '✓ ' : '✗ ') + x.desc + (x.ok ? '（影响 ' + x.affected + ' 行）' : ' → ' + x.error)));
+  reloadMeta(); loadPage();
+};
+
+$('wfDownload').onclick = () => window.open('/api/workflow/download', '_blank');
+$('wfUploadBtn').onclick = () => $('wfUploadFile').click();
+$('wfUploadFile').onchange = async () => {
+  const f = $('wfUploadFile').files[0];
+  if (!f) return;
+  const fd = new FormData();
+  fd.append('file', f);
+  const r = await (await fetch('/api/workflow/upload', {method:'POST', body: fd})).json();
+  log(r.code ? 'error' : 'ok', r.msg);
+  $('wfUploadFile').value = '';
+  loadWf();
+};
+
+/* ---------- 初始化 ---------- */
+(async () => {
+  const p = await (await fetch('/api/db/path')).json();
+  $('dbPath').textContent = '📁 ' + (p.path || '');
+  renderWfOps();
+  loadWf();
+  refresh();
+  log('info', '数据库管理服务已连接 · 点击单元格可直接编辑 · 拖拽下方日志栏可调整高度');
+})();
+</script>
+</body>
+</html>

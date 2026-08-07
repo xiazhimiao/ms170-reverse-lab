@@ -165,12 +165,32 @@ class PhoneNumberFetcher:
             print(f"获取二维码失败: {result}")
             return False
 
+    def get_rank_list(self) -> List[str]:
+        """号码类型列表（rankList 接口动态返回，含 情侣号/生日号/个性号 等中文类型）
+
+        小程序 PhoneNumChoose.requestPhoneNumTypeList 调 /no/duo/rankList（flag=1）——
+        h5 渠道前缀实测需带 qrCode。接口失败返回 []。
+        """
+        if not self.qr_code and not self._ensure_qr():
+            print("请先获取二维码")
+            return []
+        try:
+            result = self._make_request(
+                f"{self.base_url}/agentCrm/v1/h5/maker/rankList", {"qrCode": self.qr_code})
+            if result and result.get("code") == 10200:
+                data = result.get("data", [])
+                return [str(v) for v in data] if isinstance(data, list) else []
+        except Exception:
+            pass
+        return []
+
     def get_phone_numbers(
         self,
         page: int = 1,
         province: Optional[str] = None,
         city: Optional[str] = None,
         phone_type: Optional[str] = None,
+        msisdn: Optional[str] = None,
         series: str = "h5"
     ) -> List[Dict[str, str]]:
         """
@@ -181,6 +201,7 @@ class PhoneNumberFetcher:
             province: 省份ID（可选）
             city: 城市ID（可选）
             phone_type: 号码类型（可选）
+            msisdn: 号码关键词搜索（可选，如 "4" 匹配含 4 的号码；与地区/类型独立可组合）
             series: 系列（h5=靓号专区 / liu=流量卡专区）
 
         Returns:
@@ -194,12 +215,13 @@ class PhoneNumberFetcher:
         if series == "h5":
             url = f"{self.base_url}/agentCrm/v1/h5/maker/qryPhoneList"
 
-        # 构建参数数据
+        # 构建参数数据（对齐小程序 requestPhoneNumList：isGreate=1，msisdn 关键词）
         param_data = {
             "qrCode": self.qr_code,
             "showCount": 20,
             "currentPage": page,
-            "msisdn": "",
+            "msisdn": msisdn or "",
+            "isGreate": 1,
             "provinceId": province or "",
             "cityId": city or ""
         }
@@ -268,6 +290,7 @@ class PhoneNumberFetcher:
         province: Optional[str] = None,
         city: Optional[str] = None,
         phone_type: Optional[str] = None,
+        msisdn: Optional[str] = None,
         series: str = "h5",
         workers: int = 5,
     ) -> Optional[List[Dict[str, str]]]:
@@ -292,7 +315,8 @@ class PhoneNumberFetcher:
             "qrCode": self.qr_code,
             "showCount": 20,
             "currentPage": page,
-            "msisdn": "",
+            "msisdn": msisdn or "",
+            "isGreate": 1,
             "provinceId": province or "",
             "cityId": city or ""
         }
@@ -308,9 +332,9 @@ class PhoneNumberFetcher:
             return []
 
         def load(phone_info):
-            msisdn = phone_info.get("msisdn", "")
+            phone_no = phone_info.get("msisdn", "")
             try:
-                package_info = self.get_package_info(msisdn, series=series)
+                package_info = self.get_package_info(phone_no, series=series)
                 pkg = (package_info or {}).get("data", {}) or {}
             except Exception:
                 pkg = {}

@@ -16,7 +16,7 @@ a = Analysis(
         # 的 _delvewheel_patch 从这里 add_dll_directory / 按 .load-order 预加载）
         (r'C:\ProgramData\Miniconda3\Lib\site-packages\pandas.libs', 'pandas.libs'),
     ],
-    datas=[('类型.txt', '.')],
+    datas=[('类型.txt', '.'), ('db_page.html', '.')],
     hiddenimports=[
         'flask',
         'werkzeug',
@@ -45,6 +45,8 @@ a = Analysis(
         'et_xmlfile',
         'anime_bg',
         'phone_number_fetcher',
+        'duckdb',
+        'duckdb_store',
     ],
     hookspath=[],
     hooksconfig={},
